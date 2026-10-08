@@ -233,4 +233,4 @@ button { color: inherit; }
 .work-version-list p { white-space: pre-wrap; font-size: 13px; line-height: 1.6; }
 .work-versions summary { cursor: pointer; font-size: 13px; padding: 10px 0; }
 .work-version-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.work-version-badge { display: inline-block; color: #45665c; background: #edf5f1; border-radius: 6px; padding: 4px 8px; margin: 4px 0; font-size: 12px; }
+.work-version-badge { display: block; color: #7c8983; margin: 8px 0 0; font-size: 12px; font-weight: 400; }

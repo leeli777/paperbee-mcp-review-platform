@@ -51,7 +51,7 @@ export function WorkVersions({ project, isOwner, onOpen, onUpload, onUpdated }: 
     <ol className="work-version-list">
       {versions.map((version, index) => <li key={version.id} className={version.id === project.id ? "current" : ""}>
         <button type="button" onClick={() => onOpen(version.id)} disabled={version.id === project.id || busy}>
-          <b>{version.versionLabel || "未命名版本"}{index === 0 && versions.length > 1 ? " · 最新可见版" : ""}{version.id === project.id ? " · 当前查看" : ""}</b>
+          <b>{version.versionLabel || `${version.createdAt.slice(0, 10)} 稿`}{index === 0 && versions.length > 1 ? " · 最新版" : ""}{version.id === project.id ? " · 当前查看" : ""}</b>
           <span>{version.title}</span><small>{version.publicCode} · {version.visibility === "private" ? "仅自己可见" : "成员可见"} · {version.status}</small>
         </button>
         {version.revisionSummary && <p>{version.revisionSummary}</p>}

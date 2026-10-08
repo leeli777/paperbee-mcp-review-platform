@@ -685,7 +685,7 @@ function ProjectsView({ pagination, onPage, loading, personal, projects, search,
                 <span className="field-pill">{project.field}</span>
                 <span className="project-code-inline">{project.publicCode} · {project.visibility === "private" ? "仅自己可见" : "成员可见"}</span>
                 <h2>{project.title}</h2>
-                <span className="work-version-badge">{project.versionLabel || "未命名版本"} · {project.workVersionCount ?? 1} 个可见版本</span>
+                {project.workVersionCount > 1 && <span className="work-version-badge">{project.workVersionCount} 个版本</span>}
                 {(project.recommendedJournals || project.aiSubmissionAdvice) && (
                   <div className="compact-journal-advice">
                     <span>AI 投稿建议</span>
@@ -759,7 +759,7 @@ function ProjectDetailModal({ onOpenVersion, onUploadVersion, onVisibilityChange
       <div className="project-detail">
         <div className="project-detail-top"><span className="field-pill">{project.field}</span><Status status={project.status} /></div>
         <p className="project-detail-summary">{project.summary || "未填写项目摘要，请下载中文说明查看项目内容。"}</p>
-        <dl className="project-detail-meta"><div><dt>可见性</dt><dd>{project.visibility === "private" ? "仅自己可见" : "成员可见"}</dd></div><div><dt>作者</dt><dd>{project.ownerName}</dd></div><div><dt>稿件版本</dt><dd>{project.versionLabel || "未命名"} · 文件 v{project.versionNumber ?? 1}</dd></div><div><dt>审核者</dt><dd>{project.activeReviewerName || "未分配"}</dd></div></dl>
+        <dl className="project-detail-meta"><div><dt>可见性</dt><dd>{project.visibility === "private" ? "仅自己可见" : "成员可见"}</dd></div><div><dt>作者</dt><dd>{project.ownerName}</dd></div>{project.versionLabel && <div><dt>稿件版本</dt><dd>{project.versionLabel}</dd></div>}<div><dt>审核者</dt><dd>{project.activeReviewerName || "未分配"}</dd></div></dl>
         <WorkVersions project={project} isOwner={currentMember.id === project.ownerMemberId} onOpen={onOpenVersion} onUpload={onUploadVersion} onUpdated={onVisibilityChanged} />
         <div className="project-code-box"><div><span>项目编号</span><b>{project.publicCode}</b><small>项目编号只用于定位，访问仍需登录并通过权限检查。</small></div><button className="secondary-button" onClick={copyProjectCode}>{codeCopied ? "已复制" : "复制编号"}</button></div>
         {project.hasActiveAssignment && !project.canAccessReviewMaterials && (
