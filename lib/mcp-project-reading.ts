@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiAccessLogs, projects, projectTags, projectVersions } from "@/db/schema";
 import { AccessError } from "@/lib/auth";
@@ -11,6 +11,7 @@ import {
   type MaterialKind,
   type ProjectAccess,
 } from "@/lib/project-access";
+import { listWorkVersions, workIdentity } from "@/lib/work-versions";
 import { getArtifactStore } from "@/lib/storage";
 import { canReadMcpResource } from "@/lib/mcp-resource-policy.js";
 
@@ -18,6 +19,20 @@ const MAX_INLINE_TEXT_BYTES = 1024 * 1024;
 const OAUTH_SECURITY = [{ type: "oauth2", scopes: [OAUTH_SCOPE] }] as const;
 
 export const PROJECT_READ_TOOLS = [
+  {
+    name: "find_my_research_works",
+    title: "查找我已有的科研工作",
+    description: "上传前判断新工作或后续版本。只检索当前登录账号自己的工作，按工作归组，搜索覆盖历史版本的标题、摘要、编号。空 query 可分页列出全部；有 nextPage 时继续读取，不能把一页未找到当作不存在。匹配后用 get_project 和 read_project_material 核对科学内容。",
+    inputSchema: {
+      type: "object", properties: {
+        query: { type: "string", maxLength: 200 },
+        page: { type: "integer", minimum: 1, maximum: 1000000 },
+      }, additionalProperties: false,
+    },
+    securitySchemes: OAUTH_SECURITY,
+    _meta: { securitySchemes: OAUTH_SECURITY },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: "list_accessible_projects",
     title: "列出可访问的 PaperBee 项目",
@@ -62,6 +77,28 @@ export const PROJECT_READ_TOOLS = [
 
 export async function callProjectReadTool(request: Request, name: string, args: Record<string, unknown>) {
   const member = await requireOAuthMember(request);
+  if (name === "find_my_research_works") {
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    const page = args.page ?? 1;
+    if (query.length > 200 || typeof page !== "number" || !Number.isSafeInteger(page) || page < 1 || page > 1000000) throw new AccessError("无效的搜索或页码", 400);
+    const rows = await (await getDb()).select({
+      projectId: projects.id, projectCode: projects.publicCode, workId: workIdentity,
+      workRevision: projects.workRevision, versionLabel: projects.versionLabel,
+      title: projects.title, summary: projects.summary, field: projects.field,
+      revisionSummary: projects.revisionSummary,
+    }).from(projects).where(and(eq(projects.ownerMemberId, member.id),
+      sql`NOT EXISTS (SELECT 1 FROM projects newer WHERE coalesce(newer.work_id, newer.id) = ${workIdentity}
+        AND newer.owner_member_id = ${member.id} AND newer.work_revision > ${projects.workRevision})`,
+      sql`EXISTS (SELECT 1 FROM projects p WHERE coalesce(p.work_id, p.id) = ${workIdentity} AND p.owner_member_id = ${member.id}
+        AND (${query} = '' OR instr(lower(p.title), lower(${query})) > 0
+          OR instr(lower(p.summary), lower(${query})) > 0 OR instr(lower(coalesce(p.public_code, '')), lower(${query})) > 0))`,
+    )).orderBy(desc(projects.updatedAt), desc(projects.id)).limit(51).offset((page - 1) * 50);
+    await recordAccess(member.id, { action: "find_my_research_works", outcome: "success" });
+    return {
+      content: [{ type: "text", text: `本页找到 ${Math.min(rows.length, 50)} 项自己的工作；请核对研究问题、核心方法及材料中的版本沿革，不能仅凭标题相似归组。` }],
+      structuredContent: { projects: rows.slice(0, 50), page, nextPage: rows.length > 50 ? page + 1 : null },
+    };
+  }
   if (name === "list_accessible_projects") {
     const result = await listAccessibleProjects(member);
     await recordAccess(member.id, { action: "list_projects", outcome: "success" });
@@ -90,7 +127,8 @@ export async function callProjectReadTool(request: Request, name: string, args: 
       .where(eq(projectTags.projectId, access.project.id));
     const project = { ...projectSummary(member, access), summary: access.project.summary, reviewScope: access.project.reviewScope,
       aiDisclosure: access.project.aiDisclosure, recommendedJournals: splitCsv(access.project.recommendedJournals),
-      aiSubmissionAdvice: access.project.aiSubmissionAdvice, tags: tags.map((tag) => tag.name) };
+      aiSubmissionAdvice: access.project.aiSubmissionAdvice, tags: tags.map((tag) => tag.name),
+      workVersions: await listWorkVersions(member.id, access.project) };
     await recordAccess(member.id, { projectId: access.project.id, action: "get_project", outcome: "success" });
     return { content: [{ type: "text", text: `项目 ${access.project.publicCode ?? access.project.id}：${access.project.title}` }], structuredContent: { project } };
   }
@@ -205,6 +243,11 @@ function projectSummary(member: Awaited<ReturnType<typeof requireOAuthMember>>, 
   const latestVersion = Math.max(0, ...Object.values(access.artifacts).map((artifact) => artifact.versionNumber));
   return {
     projectId: access.project.publicCode ?? access.project.id,
+    workId: access.project.workId ?? access.project.id,
+    workRevision: access.project.workRevision,
+    versionLabel: access.project.versionLabel,
+    revisionSummary: access.project.revisionSummary,
+    ownedByMe: access.project.ownerMemberId === member.id,
     title: access.project.title,
     field: access.project.field,
     status: access.project.status,

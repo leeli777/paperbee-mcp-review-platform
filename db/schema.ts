@@ -68,6 +68,10 @@ export const projects = sqliteTable(
   {
     id: text("id").primaryKey(),
     publicCode: text("public_code"),
+    workId: text("work_id"),
+    workRevision: integer("work_revision").notNull().default(1),
+    versionLabel: text("version_label").notNull().default(""),
+    revisionSummary: text("revision_summary").notNull().default(""),
     title: text("title").notNull(),
     summary: text("summary").notNull(),
     field: text("field").notNull(),
@@ -87,6 +91,7 @@ export const projects = sqliteTable(
     uniqueIndex("idx_projects_public_code").on(table.publicCode),
     index("idx_projects_field_status").on(table.field, table.status),
     index("idx_projects_owner").on(table.ownerMemberId),
+    uniqueIndex("idx_projects_work_revision").on(table.workId, table.workRevision),
   ],
 );
 

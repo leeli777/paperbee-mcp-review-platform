@@ -32,11 +32,15 @@ export function isMaterialKind(value: string): value is MaterialKind {
   return MATERIAL_KINDS.includes(value as MaterialKind);
 }
 
+export function visibleProjects(member: Pick<AccessMember, "id">) {
+  return or(eq(projects.visibility, "internal"), and(eq(projects.visibility, "private"), eq(projects.ownerMemberId, member.id)));
+}
+
 export async function resolveProjectAccess(member: AccessMember, identifier: string): Promise<ProjectAccess> {
   const db = await getDb();
   const code = normalizeProjectCode(identifier);
   const [project] = await db.select().from(projects).where(and(
-    eq(projects.visibility, "internal"),
+    visibleProjects(member),
     code ? or(eq(projects.publicCode, code), eq(projects.id, identifier)) : eq(projects.id, identifier),
   )).limit(1);
   if (!project) throw new AccessError("项目不存在或不可访问", 404);
@@ -65,7 +69,7 @@ export async function resolveProjectAccess(member: AccessMember, identifier: str
 export async function listAccessibleProjects(member: AccessMember) {
   const db = await getDb();
   const projectRows = await db.select().from(projects)
-    .where(eq(projects.visibility, "internal"))
+    .where(visibleProjects(member))
     .orderBy(desc(projects.updatedAt))
     .limit(MAX_PROJECT_RESULTS + 1);
   const truncated = projectRows.length > MAX_PROJECT_RESULTS;

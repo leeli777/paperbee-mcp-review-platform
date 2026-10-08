@@ -3,6 +3,7 @@ import { getDb } from "@/db";
 import { projects, projectVersions } from "@/db/schema";
 import { isJournalOption } from "@/lib/journals";
 import { isProjectField } from "@/lib/project-fields";
+import { ownedProject, revisionFields } from "@/lib/work-versions";
 import { createUniqueProjectCode } from "@/lib/project-codes";
 import { getArtifactStore } from "@/lib/storage";
 
@@ -27,6 +28,11 @@ export class ProjectUploadError extends Error {
 export async function createProjectFromForm(form: FormData, memberId: string) {
   const uploadedKeys: string[] = [];
   try {
+    const targetProjectId = String(form.get("targetProjectId") ?? "").trim();
+    const target = targetProjectId ? await ownedProject(memberId, targetProjectId) : null;
+    const revision = revisionFields({ versionLabel: form.get("versionLabel"), revisionSummary: form.get("revisionSummary") });
+    const visibility = String(form.get("visibility") ?? "internal");
+    if (!["internal", "private"].includes(visibility)) throw new ProjectUploadError("无效的项目可见性");
     const title = String(form.get("title") ?? "").trim();
     const summary = String(form.get("summary") ?? "").trim();
     const field = String(form.get("field") ?? "").trim();
@@ -104,23 +110,31 @@ export async function createProjectFromForm(form: FormData, memberId: string) {
       });
     }
 
-    await db.batch([
+    const [createdRows] = await db.batch([
       db.insert(projects).values({
         id: projectId,
         publicCode,
+        ...revision,
+        workId: target ? sql`(SELECT coalesce(work_id, id) FROM projects WHERE id = ${target.id} AND owner_member_id = ${memberId})` : projectId,
+        workRevision: target ? sql`(SELECT (
+          SELECT coalesce(max(p.work_revision), 0) + 1 FROM projects p
+          WHERE coalesce(p.work_id, p.id) = coalesce(t.work_id, t.id)
+        ) FROM projects t WHERE t.id = ${target.id} AND t.owner_member_id = ${memberId})` : 1,
         title,
         summary,
         field,
         ownerMemberId: memberId,
+        visibility,
         status: "待分配",
         reviewScope,
         aiDisclosure,
         recommendedJournals: [...new Set(recommendedJournals)].join(","),
         aiSubmissionAdvice,
-      }),
+      }).returning({ workId: projects.workId, workRevision: projects.workRevision }),
       db.insert(projectVersions).values(versionRows),
     ]);
-    return { projectId, projectCode: publicCode };
+    const created = createdRows[0];
+    return { projectId, projectCode: publicCode, workId: created.workId, workRevision: created.workRevision };
   } catch (error) {
     if (uploadedKeys.length) {
       const store = getArtifactStore();

@@ -1,4 +1,4 @@
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
   assignments,
@@ -10,19 +10,73 @@ import {
   reviews,
   tagLikes,
 } from "@/db/schema";
-import { errorResponse, requireActiveMember } from "@/lib/auth";
+import { AccessError, errorResponse, requireActiveMember } from "@/lib/auth";
+
+import { workIdentity } from "@/lib/work-versions";
+import { visibleProjects } from "@/lib/project-access";
+
+import { parseProjectList, PROJECT_PAGE_SIZE } from "@/lib/project-list";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const member = await requireActiveMember();
     const db = await getDb();
 
+    const query = parseProjectList(request.url);
+    const visible = visibleProjects(member);
+    const requestedId = new URL(request.url).searchParams.get("projectId");
+    const scopeFilter = and(visible,
+      query.scope === "mine" ? eq(projects.ownerMemberId, member.id) : undefined,
+      query.scope === "shared" ? eq(projects.visibility, "internal") : undefined,
+    );
+    // Only visible revisions participate in grouping, filtering, counts and choosing a representative.
+    const peerVisible = sql`(p.visibility = 'internal' OR (p.visibility = 'private' AND p.owner_member_id = ${member.id}))
+      AND (${query.scope} != 'shared' OR p.visibility = 'internal')
+      AND (${query.scope} != 'mine' OR p.owner_member_id = ${member.id})`;
+    const filter = requestedId ? and(visible, eq(projects.id, requestedId)) : and(scopeFilter,
+      sql`NOT EXISTS (SELECT 1 FROM projects p WHERE coalesce(p.work_id, p.id) = ${workIdentity}
+        AND ${peerVisible} AND (p.work_revision > ${projects.workRevision}
+          OR (p.work_revision = ${projects.workRevision} AND p.id > ${projects.id})))`,
+      query.field || query.search ? sql`EXISTS (
+        SELECT 1 FROM projects p JOIN members m ON m.id = p.owner_member_id
+        WHERE coalesce(p.work_id, p.id) = ${workIdentity} AND ${peerVisible}
+          AND (${query.field} = '' OR p.field = ${query.field})
+          AND (${query.search} = '' OR instr(lower(p.title), lower(${query.search})) > 0
+            OR instr(lower(p.summary), lower(${query.search})) > 0
+            OR instr(lower(m.name), lower(${query.search})) > 0
+            OR instr(lower(coalesce(p.public_code, '')), lower(${query.search})) > 0
+            OR EXISTS (SELECT 1 FROM project_tags t WHERE t.project_id = p.id AND instr(lower(t.name), lower(${query.search})) > 0))
+      )` : undefined,
+    );
+    const [[totals], [counts]] = await Promise.all([
+      db.select({ total: sql<number>`count(*)` }).from(projects)
+        .innerJoin(members, eq(projects.ownerMemberId, members.id)).where(filter),
+      db.select({
+        accessible: sql<number>`count(distinct ${workIdentity})`,
+        shared: sql<number>`count(distinct CASE WHEN ${projects.visibility} = 'internal' THEN ${workIdentity} END)`,
+        mine: sql<number>`count(distinct CASE WHEN ${projects.ownerMemberId} = ${member.id} THEN ${workIdentity} END)`,
+        underReview: sql<number>`coalesce(sum(${projects.status} = '审核中'), 0)`,
+        passed: sql<number>`coalesce(sum(${projects.status} = '已通过'), 0)`,
+      }).from(projects).where(visible),
+    ]);
+    const total = Number(totals.total);
+    if (requestedId && !total) throw new AccessError("项目不存在或不可访问", 404);
+    const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE));
+    const page = Math.min(query.page, totalPages);
+
     const projectRows = await db
       .select({
         id: projects.id,
+        visibility: projects.visibility,
         publicCode: projects.publicCode,
+        workId: workIdentity,
+        workRevision: projects.workRevision,
+        versionLabel: projects.versionLabel,
+        revisionSummary: projects.revisionSummary,
+        workVersionCount: sql<number>`(SELECT count(*) FROM projects p WHERE coalesce(p.work_id, p.id) = ${workIdentity}
+          AND (p.visibility = 'internal' OR (p.visibility = 'private' AND p.owner_member_id = ${member.id})))`,
         title: projects.title,
         summary: projects.summary,
         field: projects.field,
@@ -56,8 +110,12 @@ export async function GET() {
       .from(projects)
       .innerJoin(members, eq(projects.ownerMemberId, members.id))
       .leftJoin(projectVersions, eq(projects.id, projectVersions.projectId))
+      .where(filter)
       .groupBy(projects.id)
-      .orderBy(desc(projects.updatedAt));
+      .orderBy(desc(projects.updatedAt), desc(projects.id))
+      .limit(PROJECT_PAGE_SIZE)
+      .offset((page - 1) * PROJECT_PAGE_SIZE);
+    const projectIds = projectRows.map((project) => project.id);
 
     const activeAssignmentRows = await db
       .select({
@@ -66,7 +124,7 @@ export async function GET() {
         reviewerMemberId: assignments.reviewerMemberId,
       })
       .from(assignments)
-      .where(inArray(assignments.status, ["待接受", "待审核"]));
+      .where(and(inArray(assignments.projectId, projectIds), inArray(assignments.status, ["待接受", "待审核"])));
 
     const tagRows = await db
       .select({
@@ -84,6 +142,7 @@ export async function GET() {
         ) then 1 else 0 end`,
       })
       .from(projectTags)
+      .where(inArray(projectTags.projectId, projectIds))
       .orderBy(desc(projectTags.createdAt));
 
     const versionRows = await db
@@ -94,6 +153,7 @@ export async function GET() {
         versionNumber: projectVersions.versionNumber,
       })
       .from(projectVersions)
+      .where(inArray(projectVersions.projectId, projectIds))
       .orderBy(desc(projectVersions.versionNumber), desc(projectVersions.createdAt));
 
     const artifactFilesByProject = new Map<string, Record<string, string>>();
@@ -169,7 +229,7 @@ export async function GET() {
       .innerJoin(projects, eq(assignments.projectId, projects.id))
       .innerJoin(members, eq(projects.ownerMemberId, members.id))
       .leftJoin(reviews, eq(assignments.id, reviews.assignmentId))
-      .where(eq(assignments.reviewerMemberId, member.id))
+      .where(and(eq(assignments.reviewerMemberId, member.id), visibleProjects(member)))
       .orderBy(desc(assignments.createdAt));
 
     return Response.json({
@@ -181,9 +241,11 @@ export async function GET() {
         researchField: member.researchField,
       },
       projects: projectsWithSocialData,
+      pagination: { page, pageSize: PROJECT_PAGE_SIZE, total, totalPages },
+      stats: counts,
       members: memberRows,
       assignments: myAssignments,
-    });
+    }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return errorResponse(error);
   }

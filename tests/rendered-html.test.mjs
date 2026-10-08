@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile as readRawFile, readdir } from "node:fs/promises";
 import test from "node:test";
+
+// Source-contract tests follow the extracted components as well as the app shell.
+async function readFile(path, encoding) {
+  const source = await readRawFile(path, encoding);
+  if (!String(path).endsWith("/app/paperbee-app.tsx")) return source;
+  const components = await Promise.all(["project-forms.tsx", "project-prompts.ts", "ui.tsx", "types.ts"].map(name => readRawFile(new URL(`../app/components/${name}`, import.meta.url), "utf8")));
+  return [source, ...components].join("\n");
+}
 
 const projectRoot = new URL("../", import.meta.url);
 
@@ -70,6 +78,28 @@ test("supports password rotation for an authenticated member", async () => {
   assert.match(passwordRoute, /sessionCookie/);
 });
 
+test("lets administrators edit member permissions and delete unused accounts", async () => {
+  const [app, runtimeSchema] = await Promise.all([
+    readFile(new URL("../app/paperbee-app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../db/runtime-schema.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /编辑权限/);
+  assert.match(app, /删除成员/);
+  assert.match(app, /method: "PATCH"/);
+  assert.match(app, /method: "DELETE"/);
+  assert.match(app, /\/api\/members\/\$\{member\.id\}/);
+  assert.match(app, /name="role"/);
+  assert.match(app, /name="status"/);
+  assert.match(app, /defaultValue=\{member\.status\}/);
+  assert.match(app, /站点管理员/);
+  assert.match(app, /isSiteOwner/);
+  assert.match(app, /仅站点管理员可管理/);
+  assert.match(app, /allowAdminRole/);
+  assert.match(runtimeSchema, /keep_active_admin_on_update/);
+  assert.match(runtimeSchema, /keep_active_admin_on_delete/);
+});
+
 test("enforces the four-part project upload specification", async () => {
   const [app, projectRoute, projectUpload, downloadRoute, schema] = await Promise.all([
     readFile(new URL("../app/paperbee-app.tsx", import.meta.url), "utf8"),
@@ -112,13 +142,13 @@ test("enforces the four-part project upload specification", async () => {
 
   const promptBlock = app.slice(
     app.indexOf("const UPLOAD_AI_PROMPT"),
-    app.indexOf("const STATUS_CLASS"),
+    app.indexOf("export function buildAiGenerateAndUploadPrompt"),
   );
   assert.doesNotMatch(promptBlock, /PaperBee/);
 
   const projectModal = app.slice(
     app.indexOf("function ProjectModal"),
-    app.indexOf("function MaterialsModal"),
+    app.indexOf("export const UPLOAD_AI_PROMPT"),
   );
   assert.doesNotMatch(projectModal, /name="reviewScope"/);
   assert.match(projectModal, /项目摘要（可选）/);

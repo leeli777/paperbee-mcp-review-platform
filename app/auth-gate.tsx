@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { SITE_OWNER_EMAIL } from "@/lib/site-owner";
 
 export function AuthGate({ setupRequired }: { setupRequired: boolean }) {
   const [submitting, setSubmitting] = useState(false);
@@ -45,7 +46,14 @@ export function AuthGate({ setupRequired }: { setupRequired: boolean }) {
       )}
       <label>
         <span>邮箱</span>
-        <input name="email" type="email" required autoComplete="email" />
+        <input
+          name="email"
+          type="email"
+          required
+          autoComplete="email"
+          defaultValue={setupRequired ? SITE_OWNER_EMAIL : undefined}
+          readOnly={setupRequired}
+        />
       </label>
       <label>
         <span>密码</span>

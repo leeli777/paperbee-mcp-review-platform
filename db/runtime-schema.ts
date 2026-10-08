@@ -22,6 +22,10 @@ export const runtimeSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS projects (
     id text PRIMARY KEY NOT NULL,
     public_code text,
+    work_id text,
+    work_revision integer DEFAULT 1 NOT NULL,
+    version_label text DEFAULT '' NOT NULL,
+    revision_summary text DEFAULT '' NOT NULL,
     title text NOT NULL,
     summary text NOT NULL,
     field text NOT NULL,
@@ -173,6 +177,44 @@ export const runtimeSchemaStatements = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_email ON members(email)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_site_user_id ON members(site_user_id)",
   "CREATE INDEX IF NOT EXISTS idx_members_status ON members(status)",
+  `CREATE TRIGGER IF NOT EXISTS keep_active_admin_on_update
+    BEFORE UPDATE OF role, status ON members
+    WHEN OLD.role = 'admin' AND OLD.status = 'active'
+      AND (NEW.role <> 'admin' OR NEW.status <> 'active')
+      AND NOT EXISTS (
+        SELECT 1 FROM members
+        WHERE id <> OLD.id AND role = 'admin' AND status = 'active'
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'paperbee_requires_active_admin');
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS keep_active_admin_on_delete
+    BEFORE DELETE ON members
+    WHEN OLD.role = 'admin' AND OLD.status = 'active'
+      AND NOT EXISTS (
+        SELECT 1 FROM members
+        WHERE id <> OLD.id AND role = 'admin' AND status = 'active'
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'paperbee_requires_active_admin');
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS protect_site_owner_permissions
+    BEFORE UPDATE OF email, role, status ON members
+    WHEN lower(OLD.email) = 'owner@example.com'
+      AND (
+        lower(NEW.email) <> 'owner@example.com'
+        OR NEW.role <> 'admin'
+        OR NEW.status <> 'active'
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'paperbee_protected_site_owner');
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS protect_site_owner_from_delete
+    BEFORE DELETE ON members
+    WHEN lower(OLD.email) = 'owner@example.com'
+    BEGIN
+      SELECT RAISE(ABORT, 'paperbee_protected_site_owner');
+    END`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)",
   "CREATE INDEX IF NOT EXISTS idx_sessions_member ON sessions(member_id)",
   "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",

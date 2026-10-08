@@ -1,6 +1,6 @@
 import { count, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { projectTags, projects } from "@/db/schema";
+import { projectTags } from "@/db/schema";
 import { errorResponse, requireActiveMember } from "@/lib/auth";
 import {
   cleanTagName,
@@ -9,6 +9,8 @@ import {
   MAX_TAGS_PER_PROJECT,
   normalizeTagName,
 } from "@/lib/tags";
+
+import { resolveProjectAccess } from "@/lib/project-access";
 
 export async function POST(
   request: Request,
@@ -28,12 +30,7 @@ export async function POST(
     }
 
     const db = await getDb();
-    const [project] = await db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
-    if (!project) return Response.json({ error: "项目不存在" }, { status: 404 });
+    await resolveProjectAccess(member, projectId);
 
     const [{ value: tagCount }] = await db
       .select({ value: count() })

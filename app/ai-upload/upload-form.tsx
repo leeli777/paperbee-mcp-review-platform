@@ -75,6 +75,7 @@ export function AiBrowserUpload() {
               <label><span>项目标题 *</span><input name="title" required maxLength={140} /></label>
               <div className="form-row">
                 <label><span>研究领域 *</span><select name="field" required defaultValue=""><option value="" disabled>选择领域</option>{PROJECT_FIELDS.map((field) => <option key={field}>{field}</option>)}</select></label>
+                <label><span>项目可见性</span><select name="visibility" defaultValue="private"><option value="private">仅自己可见</option><option value="internal">成员可见</option></select></label>
                 <label><span>AI 使用情况</span><select name="aiDisclosure" defaultValue="AI 辅助写作与代码"><option>未使用生成式 AI</option><option>AI 辅助写作与代码</option><option>AI 主导生成，人工全面核验</option></select></label>
               </div>
               <label><span>项目摘要（可选）</span><textarea name="summary" rows={3} maxLength={900} /></label>

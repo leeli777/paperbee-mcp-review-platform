@@ -116,14 +116,12 @@ test("stops hierarchical rate limiting before a failed narrow bucket can consume
 
 const ordinary = { active: true, role: "member", memberId: "member-b", ownerMemberId: "owner", reviewerMemberId: "reviewer" };
 
-test("allows an uploader to claim their own unassigned project", () => {
-  assert.equal(typeof projectAccessPolicy.canClaimProject, "function");
-  assert.equal(projectAccessPolicy.canClaimProject({
-    hasActiveAssignment: false,
-  }), true);
-  assert.equal(projectAccessPolicy.canClaimProject({
-    hasActiveAssignment: true,
-  }), false);
+test("claim excludes authors, private projects, and active assignments", () => {
+  const context = { memberId: "reviewer", ownerMemberId: "owner", visibility: "internal", hasActiveAssignment: false };
+  assert.equal(projectAccessPolicy.canClaimProject(context), true);
+  assert.equal(projectAccessPolicy.canClaimProject({ ...context, memberId: "owner" }), false);
+  assert.equal(projectAccessPolicy.canClaimProject({ ...context, visibility: "private" }), false);
+  assert.equal(projectAccessPolicy.canClaimProject({ ...context, hasActiveAssignment: true }), false);
 });
 
 test("still prevents assigning an uploader as reviewer of their own project", () => {

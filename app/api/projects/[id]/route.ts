@@ -39,6 +39,8 @@ function safeFileName(name: string) {
   return name.replace(/[^a-zA-Z0-9._\u4e00-\u9fff-]/g, "_");
 }
 
+import { resolveProjectAccess } from "@/lib/project-access";
+
 async function requireManageableProject(projectId: string) {
   const member = await requireActiveMember();
   const db = await getDb();
@@ -48,6 +50,7 @@ async function requireManageableProject(projectId: string) {
     .where(eq(projects.id, projectId))
     .limit(1);
 
+  await resolveProjectAccess(member, projectId);
   if (!project) throw new AccessError("项目不存在", 404);
   if (member.role !== "admin" && project.ownerMemberId !== member.id) {
     throw new AccessError("只有项目上传者或管理员可以管理此项目", 403);
@@ -63,11 +66,21 @@ export async function PATCH(
   const uploadedKeys: string[] = [];
   try {
     const { id: projectId } = await params;
-    const { db, member } = await requireManageableProject(projectId);
+    const { db, member, project } = await requireManageableProject(projectId);
     const isMultipart = request.headers.get("content-type")?.includes("multipart/form-data");
 
     if (!isMultipart) {
-      const payload = (await request.json()) as { field?: unknown };
+      const payload = (await request.json()) as { field?: unknown; visibility?: unknown };
+      if (payload.visibility !== undefined) {
+        if (project.ownerMemberId !== member.id) throw new AccessError("只有作者可以修改项目可见性", 403);
+        if (payload.visibility !== "internal" && payload.visibility !== "private") throw new AccessError("无效的项目可见性", 400);
+        const updated = await db.update(projects).set({ visibility: payload.visibility, updatedAt: new Date().toISOString() })
+          .where(sql`${projects.id} = ${projectId} AND (${payload.visibility} = 'internal' OR NOT EXISTS (
+            SELECT 1 FROM assignments WHERE project_id = ${projectId} AND status IN ('待接受', '待审核')
+          ))`).returning({ id: projects.id });
+        if (!updated.length) throw new AccessError("请先结束进行中的审稿，再将项目设为私有", 409);
+        return Response.json({ ok: true, visibility: payload.visibility });
+      }
       const field = typeof payload.field === "string" ? payload.field.trim() : "";
 
       if (!isProjectField(field)) {
@@ -208,9 +221,9 @@ export async function DELETE(
 
     await db.batch([
       db.update(aiAccessLogs).set({
-        projectCodeSnapshot: project.publicCode,
-        projectTitleSnapshot: project.title,
-        fileNameSnapshot: sql`coalesce(${aiAccessLogs.fileNameSnapshot}, (SELECT file_name FROM project_versions WHERE id = ${aiAccessLogs.versionId}))`,
+        projectCodeSnapshot: project.visibility === "private" ? null : project.publicCode,
+        projectTitleSnapshot: project.visibility === "private" ? null : project.title,
+        fileNameSnapshot: project.visibility === "private" ? null : sql`coalesce(${aiAccessLogs.fileNameSnapshot}, (SELECT file_name FROM project_versions WHERE id = ${aiAccessLogs.versionId}))`,
         projectId: null,
         versionId: null,
       }).where(eq(aiAccessLogs.projectId, projectId)),

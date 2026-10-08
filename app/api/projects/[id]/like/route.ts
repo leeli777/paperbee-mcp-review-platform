@@ -1,7 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { projectLikes, projects } from "@/db/schema";
+import { projectLikes } from "@/db/schema";
 import { errorResponse, requireActiveMember } from "@/lib/auth";
+
+import { resolveProjectAccess } from "@/lib/project-access";
 
 export async function POST(
   _request: Request,
@@ -11,12 +13,7 @@ export async function POST(
     const member = await requireActiveMember();
     const { id: projectId } = await params;
     const db = await getDb();
-    const [project] = await db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
-    if (!project) return Response.json({ error: "项目不存在" }, { status: 404 });
+    await resolveProjectAccess(member, projectId);
 
     const [existing] = await db
       .select({ id: projectLikes.id })

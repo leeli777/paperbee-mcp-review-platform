@@ -3,6 +3,7 @@ import { getDb } from "@/db";
 import { members } from "@/db/schema";
 import { createSession, errorResponse, isSetupRequired, sessionCookie } from "@/lib/auth";
 import { hashPassword, secureTextEqual } from "@/lib/credentials";
+import { SITE_OWNER_EMAIL, isSiteOwner } from "@/lib/site-owner";
 
 export async function POST(request: Request) {
   try {
@@ -31,6 +32,12 @@ export async function POST(request: Request) {
     }
     if (!name || !email.includes("@")) {
       return Response.json({ error: "请填写姓名和有效邮箱" }, { status: 400 });
+    }
+    if (!isSiteOwner(email)) {
+      return Response.json(
+        { error: `站点管理员邮箱必须为 ${SITE_OWNER_EMAIL}` },
+        { status: 400 },
+      );
     }
     if (password.length < 12) {
       return Response.json({ error: "密码至少需要 12 个字符" }, { status: 400 });

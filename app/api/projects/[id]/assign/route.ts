@@ -4,6 +4,8 @@ import { assignments, members, projects } from "@/db/schema";
 import { AccessError, errorResponse, requireActiveMember } from "@/lib/auth";
 import { canAssignReviewer } from "@/lib/project-access-policy";
 
+import { resolveProjectAccess } from "@/lib/project-access";
+
 const ACTIVE_ASSIGNMENT_STATUSES = ["待接受", "待审核"];
 
 export async function POST(
@@ -23,6 +25,8 @@ export async function POST(
     const db = await getDb();
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
     if (!project) return Response.json({ error: "项目不存在" }, { status: 404 });
+    await resolveProjectAccess(member, projectId);
+    if (project.visibility !== "internal") throw new AccessError("私有项目不能分配或接取审稿", 403);
     const isSelfClaim = payload.action === "claim";
     if (!isSelfClaim && member.role !== "admin" && project.ownerMemberId !== member.id) {
       throw new AccessError("只有项目作者或管理员可以分配审核", 403);
@@ -32,7 +36,7 @@ export async function POST(
     if (!reviewerMemberId || !scope) {
       return Response.json({ error: "请选择审核者并填写审核范围" }, { status: 400 });
     }
-    if (!isSelfClaim && !canAssignReviewer({ reviewerMemberId, ownerMemberId: project.ownerMemberId })) {
+    if (!canAssignReviewer({ reviewerMemberId, ownerMemberId: project.ownerMemberId })) {
       throw new AccessError("项目上传者不能被指定审核自己的项目", 403);
     }
     const [reviewer] = await db
@@ -55,15 +59,13 @@ export async function POST(
       return Response.json({ error: "该项目已经有审稿人，不能重复接取或分配" }, { status: 409 });
     }
 
-    await db.insert(assignments).values({
-      id: crypto.randomUUID(),
-      projectId,
-      reviewerMemberId,
-      assignedByMemberId: member.id,
-      scope,
-      dueDate: payload.dueDate || null,
-      status: "待审核",
-    });
+    // Keep the visibility check inside the write so a concurrent privacy change cannot race a claim.
+    const inserted = await db.run(sql`INSERT INTO assignments
+      (id, project_id, reviewer_member_id, assigned_by_member_id, scope, due_date, status)
+      SELECT ${crypto.randomUUID()}, ${projectId}, ${reviewerMemberId}, ${member.id}, ${scope}, ${payload.dueDate || null}, '待审核'
+      FROM projects WHERE id = ${projectId} AND visibility = 'internal' AND owner_member_id != ${reviewerMemberId}`);
+    if (!inserted.meta.changes) throw new AccessError("项目已不可接取，请刷新后重试", 409);
+
     await db
       .update(projects)
       .set({ status: "审核中", updatedAt: new Date().toISOString() })
@@ -87,6 +89,7 @@ export async function DELETE(
     const member = await requireActiveMember();
     const { id: projectId } = await params;
     const db = await getDb();
+    await resolveProjectAccess(member, projectId);
     const [assignment] = await db
       .select({ id: assignments.id })
       .from(assignments)

@@ -91,26 +91,66 @@ test("runs the OAuth, MCP, revocation, isolation, and audit flow against workerd
       headers: { "content-type": "application/json", cookie: ownerCookie },
       body: JSON.stringify({ action: "claim" }),
     });
-    assert.equal(ownerClaim.status, 201);
-    assert.deepEqual(await ownerClaim.json(), { ok: true });
-
+    assert.equal(ownerClaim.status, 403);
     const ownerBootstrap = await jsonFetch(`${base}/api/bootstrap`, { headers: { cookie: ownerCookie } });
-    const claimedProject = ownerBootstrap.projects.find((entry) => entry.id === ownerProject.projectId);
-    assert.equal(claimedProject?.hasActiveAssignment, true);
-    assert.ok(claimedProject?.myActiveAssignmentId);
+    assert.equal(ownerBootstrap.projects.find((p) => p.id === ownerProject.projectId)?.hasActiveAssignment, false);
 
-    const duplicateClaim = await fetch(`${base}/api/projects/${ownerProject.projectId}/assign`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: ownerCookie },
-      body: JSON.stringify({ action: "claim" }),
+    const setVisibility = (visibility) => fetch(`${base}/api/projects/${ownerProject.projectId}`, {
+      method: "PATCH", headers: { "content-type": "application/json", cookie: ownerCookie }, body: JSON.stringify({ visibility }),
     });
-    assert.equal(duplicateClaim.status, 409);
-
-    const abandonClaim = await fetch(`${base}/api/projects/${ownerProject.projectId}/assign`, {
-      method: "DELETE",
-      headers: { cookie: ownerCookie },
+    assert.equal((await setVisibility("invalid")).status, 400);
+    await jsonFetch(`${base}/api/projects/${ownerProject.projectId}/tags`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie }, body: JSON.stringify({ name: "private-tag" }),
     });
-    assert.equal(abandonClaim.status, 200);
+    assert.equal((await setVisibility("private")).status, 200);
+    const privateOwner = await jsonFetch(`${base}/api/bootstrap`, { headers: { cookie: ownerCookie } });
+    assert.equal(privateOwner.projects.find((p) => p.id === ownerProject.projectId)?.visibility, "private");
+    const privateTag = privateOwner.projects.find((p) => p.id === ownerProject.projectId).tags[0];
+    assert.equal((await fetch(`${base}/api/tags/${privateTag.id}/like`, { method: "POST" })).status, 404);
+    const privateAdmin = await jsonFetch(`${base}/api/bootstrap`);
+    assert.equal(privateAdmin.projects.some((p) => p.id === ownerProject.projectId), false);
+    for (const suffix of ["preview?kind=description", "download?kind=description"]) {
+      assert.equal((await fetch(`${base}/api/projects/${ownerProject.projectId}/${suffix}`)).status, 404);
+    }
+    for (const [suffix, payload] of [["like", {}], ["tags", { name: "secret" }], ["assign", { action: "claim" }]]) {
+      assert.equal((await fetch(`${base}/api/projects/${ownerProject.projectId}/${suffix}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+      })).status, 404);
+    }
+    assert.equal((await fetch(`${base}/api/projects/${ownerProject.projectId}`, { method: "DELETE" })).status, 404);
+    const privateOwnerPair = await issueCimdPair(base, ordinary, ip);
+    const privateOtherPair = await issueCimdPair(base, reviewer, ip);
+    assert.equal((await callMaterial(base, privateOwnerPair.access_token, ownerProject.projectCode, "description")).result.isError ?? false, false);
+    assert.equal((await callMaterial(base, privateOtherPair.access_token, ownerProject.projectCode, "description")).result.isError, true);
+    const foundOwn = await rpc(base, "tools/call", { name: "find_my_research_works", arguments: { query: "Owner claim" } }, privateOwnerPair.access_token);
+    assert.equal(foundOwn.result.structuredContent.projects[0].projectId, ownerProject.projectId);
+    const foundOther = await rpc(base, "tools/call", { name: "find_my_research_works", arguments: {} }, privateOtherPair.access_token);
+    assert.equal(foundOther.result.structuredContent.projects.length, 0);
+    const ownDetails = await rpc(base, "tools/call", { name: "get_project", arguments: { projectId: ownerProject.projectCode } }, privateOwnerPair.access_token);
+    assert.equal(ownDetails.result.structuredContent.project.workVersions[0].id, ownerProject.projectId);
+    assert.equal(ownDetails.result.structuredContent.project.ownedByMe, true);
+    const invalidPage = await rpc(base, "tools/call", { name: "find_my_research_works", arguments: { page: 0 } }, privateOwnerPair.access_token);
+    assert.equal(invalidPage.result.isError, true);
+    const privateAudit = await jsonFetch(`${base}/api/download-logs`);
+    assert.equal(privateAudit.logs.some((row) => row.projectCode === ownerProject.projectCode), false);
+    const privateCreateForm = new FormData();
+    privateCreateForm.set("title", "Private from creation");
+    privateCreateForm.set("field", "量子信息");
+    privateCreateForm.set("visibility", "private");
+    privateCreateForm.set("descriptionFile", new File(["Private draft"], "description.md", { type: "text/markdown" }));
+    const privateCreated = await jsonFetch(`${base}/api/projects`, { method: "POST", headers: { cookie: ownerCookie }, body: privateCreateForm });
+    assert.equal((await callMaterial(base, privateOwnerPair.access_token, privateCreated.projectCode, "description")).result.isError ?? false, false);
+    assert.equal((await callMaterial(base, privateOtherPair.access_token, privateCreated.projectCode, "description")).result.isError, true);
+    await jsonFetch(`${base}/api/projects/${privateCreated.projectId}`, { method: "DELETE", headers: { cookie: ownerCookie } });
+    const deletedPrivateAudit = await jsonFetch(`${base}/api/download-logs`);
+    assert.equal(deletedPrivateAudit.logs.some((row) => row.projectCode === privateCreated.projectCode || row.projectTitle === "Private from creation"), false);
+    assert.equal((await setVisibility("internal")).status, 200);
+    const otherClaim = await fetch(`${base}/api/projects/${ownerProject.projectId}/assign`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "claim" }),
+    });
+    assert.equal(otherClaim.status, 201);
+    assert.equal((await setVisibility("private")).status, 409);
+    assert.equal((await fetch(`${base}/api/projects/${ownerProject.projectId}/assign`, { method: "DELETE" })).status, 200);
 
     const adminBootstrap = await jsonFetch(`${base}/api/bootstrap`);
     const ownerMemberId = adminBootstrap.members.find((entry) => entry.email === ordinary.email)?.id;

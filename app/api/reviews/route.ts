@@ -3,6 +3,8 @@ import { getDb } from "@/db";
 import { assignments, projects, reviews } from "@/db/schema";
 import { AccessError, errorResponse, requireActiveMember } from "@/lib/auth";
 
+import { resolveProjectAccess } from "@/lib/project-access";
+
 export async function POST(request: Request) {
   try {
     const member = await requireActiveMember();
@@ -24,6 +26,10 @@ export async function POST(request: Request) {
       )
       .limit(1);
     if (!assignment) throw new AccessError("你无权提交此审核任务", 403);
+
+    const { project } = await resolveProjectAccess(member, assignment.projectId);
+    if (project.ownerMemberId === member.id) throw new AccessError("不能审核自己的项目", 403);
+    if (!["待接受", "待审核"].includes(assignment.status)) throw new AccessError("该审核任务已结束", 409);
 
     await db.batch([
       db.insert(reviews).values({

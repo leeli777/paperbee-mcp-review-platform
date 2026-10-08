@@ -22,6 +22,9 @@ const DOCUMENT = {
                 type: "object",
                 required: ["title", "field", "descriptionFile"],
                 properties: {
+                  targetProjectId: { type: "string", description: "自己的已有工作任一版本的 PB 编号或 UUID；省略则创建新工作。" },
+                  versionLabel: { type: "string", maxLength: 60 },
+                  revisionSummary: { type: "string", maxLength: 1800 },
                   title: { type: "string", maxLength: 140 },
                   field: {
                     type: "string",
@@ -29,6 +32,7 @@ const DOCUMENT = {
                   },
                   summary: { type: "string", maxLength: 900 },
                   aiDisclosure: { type: "string" },
+                  visibility: { type: "string", enum: ["internal", "private"], default: "internal" },
                   recommendedJournals: { type: "array", items: { type: "string" } },
                   aiSubmissionAdvice: { type: "string", maxLength: 1800 },
                   descriptionFile: { type: "string", format: "binary" },

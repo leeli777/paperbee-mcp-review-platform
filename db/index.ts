@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 import { runtimeSchemaStatements } from "./runtime-schema";
 import { generateProjectCode } from "@/lib/project-codes";
+import { SITE_OWNER_EMAIL } from "@/lib/site-owner";
 
 let schemaReady: Promise<void> | null = null;
 
@@ -50,6 +51,17 @@ export async function getDb() {
         "ALTER TABLE projects ADD ai_submission_advice text DEFAULT '' NOT NULL",
       ).run();
     }
+    for (const [column, definition] of [
+      ["work_id", "text"],
+      ["work_revision", "integer DEFAULT 1 NOT NULL"],
+      ["version_label", "text DEFAULT '' NOT NULL"],
+      ["revision_summary", "text DEFAULT '' NOT NULL"],
+    ]) {
+      if (!projectColumns.results.some((entry) => entry.name === column)) {
+        await env.DB.prepare(`ALTER TABLE projects ADD ${column} ${definition}`).run();
+      }
+    }
+    await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_work_revision ON projects(work_id, work_revision)").run();
     const codeColumns = await env.DB.prepare("PRAGMA table_info(oauth_authorization_codes)").all<{ name: string }>();
     if (!codeColumns.results.some((column) => column.name === "credential_version")) {
       await env.DB.prepare("ALTER TABLE oauth_authorization_codes ADD credential_version integer DEFAULT 0 NOT NULL").run();
@@ -96,6 +108,19 @@ export async function getDb() {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_number_kind ON project_versions(project_id, version_number, artifact_kind)",
       ),
     ]);
+    const siteOwners = await env.DB.prepare(
+      "SELECT id FROM members WHERE lower(email) = ? LIMIT 2",
+    ).bind(SITE_OWNER_EMAIL).all<{ id: string }>();
+    if (siteOwners.results.length > 1) {
+      throw new Error("paperbee_multiple_site_owners");
+    }
+    await env.DB.prepare(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_members_site_owner_unique
+       ON members(lower(email)) WHERE lower(email) = '${SITE_OWNER_EMAIL}'`,
+    ).run();
+    await env.DB.prepare(
+      "UPDATE members SET role = 'admin', status = 'active' WHERE lower(email) = ?",
+    ).bind(SITE_OWNER_EMAIL).run();
   })();
   await schemaReady;
 

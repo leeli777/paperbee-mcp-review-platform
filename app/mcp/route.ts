@@ -11,7 +11,7 @@ import {
 } from "@/lib/upload-token-auth";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
-const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "2.1.0";
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const NOAUTH_SECURITY = [{ type: "noauth" }] as const;
 
@@ -31,7 +31,7 @@ const UPLOAD_TOOL = {
   name: "upload_research_project",
   title: "上传科研项目到 PaperBee",
   description:
-    "把当前对话或 ChatGPT 文件库中真实存在的科研项目材料直接上传到 PaperBee。请把全部现有文件作为 materials 文件数组提交，PaperBee 会按文件名识别中文说明、AI 预审、论文和复现包。中文说明必传，其他材料可选；不要传文件名字符串，也不要为了补齐可选项创建空文件。",
+    "把当前对话或 ChatGPT 文件库中真实存在的科研项目材料直接上传到 PaperBee。请把全部现有文件作为 materials 文件数组提交，PaperBee 会按文件名识别中文说明、AI 预审、论文和复现包。先用 find_my_research_works 判断是否已有同一工作，后续版本填写 targetProjectId，新工作省略；不确定归属时询问用户。中文说明必传，其他材料可选；不要传文件名字符串，也不要为了补齐可选项创建空文件。",
   inputSchema: {
     type: "object",
     $defs: { OpenAIFile: FILE_SCHEMA },
@@ -40,6 +40,9 @@ const UPLOAD_TOOL = {
         type: "string",
         description: "PaperBee 生成的六十分钟单次临时上传授权，以 pb_upload_ 开头。",
       },
+      targetProjectId: { type: "string", description: "同一科研工作的任一已有版本的 PB 编号或 UUID。仅能追加到上传授权所属账号自己的工作；新工作省略。追加会创建独立版本，不覆盖旧材料。" },
+      versionLabel: { type: "string", maxLength: 60, description: "实际稿件版本，例如 v0.3；不确定则留空。" },
+      revisionSummary: { type: "string", maxLength: 1800, description: "相较前一稿的主要修改；新工作可留空。" },
       title: { type: "string", maxLength: 140 },
       field: {
         type: "string",
@@ -47,6 +50,7 @@ const UPLOAD_TOOL = {
       },
       summary: { type: "string", maxLength: 900 },
       aiDisclosure: { type: "string" },
+      visibility: { type: "string", enum: ["internal", "private"], description: "internal 为成员可见，private 为仅上传者可见；省略时保持成员可见。" },
       recommendedJournals: {
         type: "array",
         items: { type: "string" },
@@ -70,6 +74,8 @@ const UPLOAD_TOOL = {
       status: { type: "string", enum: ["uploaded", "failed"] },
       projectId: { type: "string" },
       projectCode: { type: "string" },
+      workId: { type: "string" },
+      workRevision: { type: "number" },
       ownerName: { type: "string" },
       errorCode: { type: "string" },
       error: { type: "string" },
@@ -250,8 +256,12 @@ async function uploadProject(args: Record<string, unknown>) {
     const form = new FormData();
     form.set("title", requiredString(args.title, "缺少项目标题"));
     form.set("field", requiredString(args.field, "缺少项目分类"));
+    setOptionalString(form, "targetProjectId", args.targetProjectId);
+    setOptionalString(form, "versionLabel", args.versionLabel);
+    setOptionalString(form, "revisionSummary", args.revisionSummary);
     setOptionalString(form, "summary", args.summary);
     setOptionalString(form, "aiDisclosure", args.aiDisclosure);
+    setOptionalString(form, "visibility", args.visibility);
     setOptionalString(form, "aiSubmissionAdvice", args.aiSubmissionAdvice);
     if (Array.isArray(args.recommendedJournals)) {
       for (const journal of args.recommendedJournals) {
@@ -276,6 +286,8 @@ async function uploadProject(args: Record<string, unknown>) {
       structuredContent: {
         projectId: result.projectId,
         projectCode: result.projectCode,
+        workId: result.workId,
+        workRevision: result.workRevision,
         ownerName: member.memberName,
         status: "uploaded",
       },

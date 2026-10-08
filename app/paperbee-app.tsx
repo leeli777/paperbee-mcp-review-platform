@@ -1,103 +1,20 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { SiteIdentity } from "@/lib/auth";
-import { JOURNAL_OPTIONS } from "@/lib/journals";
 import { normalizeMarkdownForPreview } from "@/lib/markdown-preview";
 import { canClaimProject } from "@/lib/project-access-policy";
 import { PROJECT_FIELDS } from "@/lib/project-fields";
-
-type Member = {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  researchField: string;
-  status: string;
-  lastSeenAt: string | null;
-};
-
-type Project = {
-  id: string;
-  publicCode: string;
-  title: string;
-  summary: string;
-  field: string;
-  status: string;
-  reviewScope: string;
-  aiDisclosure: string;
-  recommendedJournals: string;
-  aiSubmissionAdvice: string;
-  ownerMemberId: string;
-  ownerName: string;
-  versionNumber: number | null;
-  fileName: string | null;
-  artifactKinds: string;
-  artifactFiles: Record<string, string>;
-  assignmentCount: number;
-  hasActiveAssignment: boolean;
-  activeReviewerName: string;
-  myActiveAssignmentId: string | null;
-  canAccessReviewMaterials: boolean;
-  likeCount: number;
-  likedByMe: boolean;
-  tags: ProjectTag[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-type ProjectTag = {
-  id: string;
-  projectId: string;
-  name: string;
-  likeCount: number;
-  likedByMe: boolean;
-};
-
-type Assignment = {
-  id: string;
-  status: string;
-  scope: string;
-  dueDate: string | null;
-  projectId: string;
-  projectTitle: string;
-  projectField: string;
-  projectSummary: string;
-  ownerName: string;
-  reviewId: string | null;
-};
-
-type DownloadLog = {
-  id: string;
-  occurredAt: string;
-  source: "web" | "chatgpt_mcp";
-  action: string;
-  outcome: string;
-  denialReason: string | null;
-  projectId: string | null;
-  projectCode: string | null;
-  projectTitle: string | null;
-  versionNumber: number | null;
-  artifactKind: string | null;
-  fileName: string | null;
-  memberId: string;
-  memberName: string;
-  memberEmail: string;
-};
-
-type BootstrapData = {
-  member: Member;
-  projects: Project[];
-  members: Member[];
-  assignments: Assignment[];
-};
-
-type View = "overview" | "projects" | "reviews" | "members" | "downloads";
+import { isSiteOwner } from "@/lib/site-owner";
+import type { Member, Project, ProjectTag, Assignment, DownloadLog, BootstrapData, View } from "./components/types";
+import { WorkVersions } from "./components/work-versions";
+import { ProjectVisibility, EditProjectModal, ProjectModal } from "./components/project-forms";
+import { Modal, MetricCard, Status, EmptyProjects, LoadingState, ErrorState } from "./components/ui";
 
 const PROJECT_MATERIALS = [
   { number: "1", kind: "description", label: "科研项目中文说明", note: "项目概览、证据、限制与审核重点", required: true },
@@ -110,8 +27,8 @@ function isRestrictedReviewMaterial(kind: string) {
   return kind === "paper" || kind === "reproduction";
 }
 
-async function fetchBootstrapData() {
-  const response = await fetch("/api/bootstrap", { cache: "no-store" });
+async function fetchBootstrapData(query = "", signal?: AbortSignal) {
+  const response = await fetch(`/api/bootstrap?${query}`, { cache: "no-store", signal });
   const payload = (await response.json()) as BootstrapData & { error?: string };
   if (!response.ok) throw new Error(payload.error ?? "无法读取工作台数据");
   return payload;
@@ -125,58 +42,6 @@ async function fetchDownloadLogs() {
 }
 
 const FIELD_OPTIONS = PROJECT_FIELDS;
-const UPLOAD_AI_PROMPT = `你是科研项目整理助手。请阅读我接下来提供的项目资料，为参与内部审核的研究人员准备以下材料。只使用资料中真实存在的内容，不要编造结果、引文或复现情况；不确定的地方直接标为“尚未确认”。
-
-请在一个新的 output 文件夹中生成：
-
-1. 项目中文说明.md（必须）
-请把它写成一份面向同行的中文研讨会式研究导读，让没有参与项目、但具备相关专业背景的审核者，像听一次 10–15 分钟的内部学术报告一样理解这项工作。
-
-不要套用固定的五段式模板，也不要逐项回答清单。请根据项目自身的科学逻辑，自由选择章节、顺序和详略：开头尽快让读者知道研究问题和最重要的结论，随后围绕真正承重的物理图景、核心想法、推理链条和主要结果展开，说明这些结果在物理上意味着什么、由什么证据支持、适用边界在哪里。最后自然交代仍存在的局限、未解决问题，以及最值得真人审核者检查的关键环节。
-
-必须单独包含一节“创新性说明”。这一节要明确区分已有理论、标准工具或已知结论，与本项目真正新增的结果；说明新增部分为什么有科学意义，同时诚实交代创新性的边界。不能仅凭没有检索到相同论文就断言首创；未完成充分文献核验时直接说明。
-
-以帮助同行理解科学内容为目标，可以使用必要的公式、直观例子和关键数字，但不要写成申报书、合规清单、项目管理报告或流水账。不要堆砌运行日志、完整参数、文件清单、人员分工和冗长复现步骤；这些内容只有在理解或判断结果可靠性时必不可少才提。中文应自然清楚，专业术语在英文更准确时保留英文。不设置固定字数，以把项目讲清楚为准。
-
-这份文件是研究导读，不是 AI 预审报告。不要加入评分表，也不要以投稿期刊、是否送审或是否继续修改为主线；这些判断放在单独的 AI 预审摘要中。
-
-Markdown 排版要求（两份 .md 文件都必须遵守）：
-- 文件使用 UTF-8 编码，采用标准 Markdown；一级标题只用于文档标题，正文从二级标题开始；标题、段落、列表、表格、公式块和代码块之间保留空行。
-- 行内公式使用单个美元符号包围，例如 $E=mc^2$；独立公式使用成对的双美元符号，并让起止符号各自单独占一行。不要用代码块包裹公式，不要混用全角美元符号，不要留下未配对的美元符号。
-- 公式使用通用 LaTeX/KaTeX 语法；避免依赖自定义宏、外部宏包或只在特定 TeX 模板中定义的命令。矩阵、分式、上下标、希腊字母和算符均使用规范 LaTeX 命令。
-- 表格使用标准 Markdown 表格；较长公式不要塞进表格。代码使用带语言标记的 fenced code block，例如三个反引号后写 python。
-- 不使用原始 HTML、脚本、iframe 或外部样式；不要引用本地绝对路径。生成后检查标题层级、列表缩进、代码围栏以及每一对公式定界符，确保网页渲染时不会断裂。
-
-2. AI预审摘要.md（可选）
-只有在你实际阅读了项目材料并能进行初步评价时才生成。它要比中文说明更短，约 500–1200 个汉字，供真人审核者参考，不代替独立同行评审。使用下面的固定结构：
-- 一句话结论：建议进入审核、修改后审核，或暂不建议继续；
-- 评分表：理论正确性与严谨性、创新性、科学意义、证据充分性、表述与结构、可复现性、综合评分，均采用 1–5 分；
-- 最强贡献：不超过三点；
-- 最大审稿风险：不超过三点；
-- 建议真人审核者重点检查什么；
-- 是否值得继续修改，以及不超过三项的最小修改建议；
-- 候选期刊建议：从 PRL、PRD、PRC、PRA、PRX、EPJC、CPC、JHEP 或更合适的期刊中推荐 1–3 个，并简要说明匹配度和主要门槛；
-- 注明使用的 AI 模型、生成日期、项目版本、实际读取的材料和未检查的部分。
-
-报告开头必须标注“AI 预审，仅供参考”。没有实际检查的推导、代码、数据或文献不能声称已经验证；证据不足时降低评分并说明原因。
-
-3. 论文.pdf（可选）
-如果项目中已有论文稿件，就整理并导出为 PDF；没有稿件则跳过，不要为了凑齐材料而新编一篇论文。
-
-4. 完整复现包.zip（可选）
-如果已有可运行的代码和必要材料，就整理成复现包，并在根目录放一个简短 README，写明环境、入口命令和主要输出；资料不足则跳过。删除密码、令牌、个人隐私、缓存和无关大文件，不要放入无权分发的数据。
-
-文件规范：中文说明和 AI 预审支持 MD、TXT、PDF 或 DOCX；论文只用 PDF；复现包使用 ZIP、TAR.GZ 或 TGZ；每个文件不超过 25 MB。文件名清晰，不使用“final_final”等含混名称。
-
-完成后告诉我生成了哪些文件、跳过了哪些可选文件，以及哪些科学内容仍需我人工确认。不要声称完成了实际上没有执行的检查。`;
-const STATUS_CLASS: Record<string, string> = {
-  待分配: "status-amber",
-  审核中: "status-blue",
-  待修改: "status-coral",
-  已通过: "status-green",
-  已暂停: "status-neutral",
-};
-
 export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
   const [data, setData] = useState<BootstrapData | null>(null);
   const [view, setView] = useState<View>("overview");
@@ -184,8 +49,11 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showProjectForm, setShowProjectForm] = useState(false);
+  const [uploadTarget, setUploadTarget] = useState<Project | null>(null);
+  const [extraProjects, setExtraProjects] = useState<Project[]>([]);
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [editMember, setEditMember] = useState<Member | null>(null);
   const [assignProject, setAssignProject] = useState<Project | null>(null);
   const [materialProject, setMaterialProject] = useState<Project | null>(null);
   const [previewProject, setPreviewProject] = useState<Project | null>(null);
@@ -193,6 +61,10 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
   const [editProjectId, setEditProjectId] = useState("");
   const [reviewAssignment, setReviewAssignment] = useState<Assignment | null>(null);
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [loadedQuery, setLoadedQuery] = useState("");
+  const requestSequence = useRef(0);
   const [fieldFilter, setFieldFilter] = useState("全部领域");
   const [downloadLogs, setDownloadLogs] = useState<DownloadLog[]>([]);
   const [downloadLogLimit, setDownloadLogLimit] = useState(200);
@@ -201,46 +73,83 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
   const [projectActionId, setProjectActionId] = useState("");
   const [socialActionKey, setSocialActionKey] = useState("");
 
+  const queryString = useMemo(() => {
+    const isList = view === "projects" || view === "space";
+    return new URLSearchParams({
+      scope: view === "space" ? "mine" : view === "projects" ? "shared" : "all",
+      page: String(isList ? page : 1),
+      q: isList ? debouncedSearch : "",
+      field: isList && fieldFilter !== "全部领域" ? fieldFilter : "",
+    }).toString();
+  }, [view, page, debouncedSearch, fieldFilter]);
+
+  const queryLoading = loadedQuery !== queryString;
+  const currentQuery = useRef(queryString);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   const loadData = useCallback(async () => {
+    const query = currentQuery.current;
+    const sequence = ++requestSequence.current;
     setLoading(true);
     try {
-      const payload = await fetchBootstrapData();
+      const payload = await fetchBootstrapData(query);
+      if (sequence !== requestSequence.current) return;
       setData(payload);
+      setLoadedQuery(query);
       setError("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法读取工作台数据");
+      if (sequence === requestSequence.current) setError(caught instanceof Error ? caught.message : "无法读取工作台数据");
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, []);
 
   const reloadDataSilently = useCallback(async () => {
-    const payload = await fetchBootstrapData();
-    setData(payload);
-    setError("");
+    const query = currentQuery.current;
+    const sequence = ++requestSequence.current;
+    try {
+      const payload = await fetchBootstrapData(query);
+      if (sequence !== requestSequence.current) return;
+      setData(payload);
+      setLoadedQuery(query);
+      setError("");
+    } catch (caught) {
+      if (sequence === requestSequence.current) setError(caught instanceof Error ? caught.message : "无法刷新工作台数据");
+      throw caught;
+    } finally {
+      if (sequence === requestSequence.current) setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
+    currentQuery.current = queryString;
     let cancelled = false;
+    const controller = new AbortController();
+    const sequence = ++requestSequence.current;
 
-    void fetchBootstrapData()
+    void fetchBootstrapData(queryString, controller.signal)
       .then((payload) => {
-        if (cancelled) return;
+        if (cancelled || sequence !== requestSequence.current) return;
         setData(payload);
         setError("");
       })
       .catch((caught: unknown) => {
-        if (cancelled) return;
+        if (cancelled || sequence !== requestSequence.current) return;
         setError(caught instanceof Error ? caught.message : "无法读取工作台数据");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && sequence === requestSequence.current) { setLoading(false); setLoadedQuery(queryString); }
       });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, []);
+  }, [queryString]);
 
   useEffect(() => {
     if (!notice) return;
@@ -262,25 +171,24 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
     }
   }, []);
 
-  const filteredProjects = useMemo(() => {
-    const normalized = search.trim().toLowerCase();
-    return (data?.projects ?? []).filter((project) => {
-      const matchesText =
-        !normalized ||
-        project.title.toLowerCase().includes(normalized) ||
-        project.summary.toLowerCase().includes(normalized) ||
-        project.ownerName.toLowerCase().includes(normalized);
-      const matchesTag = project.tags.some((tag) => tag.name.toLowerCase().includes(normalized));
-      const matchesField = fieldFilter === "全部领域" || project.field === fieldFilter;
-      return (matchesText || matchesTag) && matchesField;
-    });
-  }, [data?.projects, fieldFilter, search]);
+  const filteredProjects = data?.projects ?? [];
 
   const visibleAssignments = (data?.assignments ?? []).filter((assignment) => assignment.status !== "已放弃");
   const pendingReviews = visibleAssignments.filter((assignment) => assignment.status !== "已完成");
   const activeMembers = (data?.members ?? []).filter((member) => member.status === "active");
-  const detailProject = data?.projects.find((project) => project.id === detailProjectId) ?? null;
-  const editProject = data?.projects.find((project) => project.id === editProjectId) ?? null;
+  const detailProject = data?.projects.find((project) => project.id === detailProjectId) ?? extraProjects.find(project => project.id === detailProjectId) ?? null;
+  const editProject = data?.projects.find((project) => project.id === editProjectId) ?? extraProjects.find(project => project.id === editProjectId) ?? null;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const ids = [...new Set([detailProjectId, editProjectId].filter(id => id && !data?.projects.some(project => project.id === id)))];
+    if (ids.length) {
+      Promise.all(ids.map(id => fetchBootstrapData(new URLSearchParams({ projectId: id }).toString(), controller.signal)))
+        .then(results => setExtraProjects(results.flatMap(result => result.projects)))
+        .catch(caught => { if (!controller.signal.aborted) { setExtraProjects([]); setDetailProjectId(""); setEditProjectId(""); setNotice(caught instanceof Error ? caught.message : "无法读取该版本"); } });
+    }
+    return () => controller.abort();
+  }, [data, detailProjectId, editProjectId]);
 
   const refreshWithNotice = async (message: string) => {
     await loadData();
@@ -327,6 +235,18 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
       window.alert(caught instanceof Error ? caught.message : "无法删除项目");
     } finally {
       setProjectActionId("");
+    }
+  };
+
+  const deleteMember = async (member: Member) => {
+    if (!window.confirm(`确定删除成员“${member.name}”吗？已有项目、审核或审计记录的成员只能停用。`)) return;
+    try {
+      const response = await fetch(`/api/members/${member.id}`, { method: "DELETE" });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "无法删除成员");
+      await refreshWithNotice("成员已删除");
+    } catch (caught) {
+      window.alert(caught instanceof Error ? caught.message : "无法删除成员");
     }
   };
 
@@ -395,12 +315,14 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
 
   const navigation: { id: View; label: string; count?: number }[] = [
     { id: "overview", label: "工作台" },
-    { id: "projects", label: "项目池", count: data?.projects.length },
+    { id: "projects", label: "项目池", count: data?.stats.shared },
+    { id: "space", label: "我的空间", count: data?.stats.mine },
     { id: "reviews", label: "待我审核", count: pendingReviews.length },
     { id: "members", label: "成员", count: data?.members.length },
     ...(data?.member.role === "admin" ? [{ id: "downloads" as const, label: "访问审计" }] : []),
   ];
   const navigate = (nextView: View) => {
+    setPage(1);
     setView(nextView);
     if (nextView === "downloads") void loadDownloadLogs();
   };
@@ -419,13 +341,13 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
         </div>
         <nav aria-label="主导航">
           <p className="nav-label">空间</p>
-          {navigation.map((item, index) => (
+          {navigation.map((item) => (
             <button
               className={`nav-item ${view === item.id ? "active" : ""}`}
               key={item.id}
               onClick={() => navigate(item.id)}
             >
-              <span className={`nav-symbol nav-symbol-${index}`} aria-hidden="true" />
+              <span className={`nav-symbol nav-symbol-${({ overview: 0, projects: 1, space: 1, reviews: 2, members: 3, downloads: 4 })[item.id]}`} aria-hidden="true" />
               <span>{item.label}</span>
               {typeof item.count === "number" && <em>{item.count}</em>}
             </button>
@@ -447,7 +369,7 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
             <button className="icon-button" aria-label="通知"><span className="bell" /><i /></button>
             <div className="user-chip">
               <span>{initials(data?.member.name ?? identity.displayName)}</span>
-              <div><b>{data?.member.name ?? identity.displayName}</b><small>{roleLabel(data?.member.role ?? "member")}</small></div>
+              <div><b>{data?.member.name ?? identity.displayName}</b><small>{roleLabel(data?.member.role ?? "member", data?.member.email)}</small></div>
             </div>
             <button className="account-button" onClick={() => setShowPasswordForm(true)}>修改密码</button>
             <button className="account-button" onClick={logout}>退出</button>
@@ -474,19 +396,23 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
                   data={data}
                   pendingReviews={pendingReviews}
                   activeMembers={activeMembers}
-                  onNewProject={() => setShowProjectForm(true)}
-                  onNavigate={setView}
+                  onNewProject={() => { setUploadTarget(null); setShowProjectForm(true); }}
+                  onNavigate={navigate}
                   onDownload={setMaterialProject}
                 />
               )}
-              {view === "projects" && (
+              {(view === "projects" || view === "space") && (
                 <ProjectsView
+                  pagination={data.pagination}
+                  onPage={setPage}
+                  loading={queryLoading}
+                  personal={view === "space"}
                   projects={filteredProjects}
                   search={search}
                   fieldFilter={fieldFilter}
-                  onSearch={setSearch}
-                  onFieldFilter={setFieldFilter}
-                  onNewProject={() => setShowProjectForm(true)}
+                  onSearch={(value) => { setPage(1); setSearch(value); }}
+                  onFieldFilter={(value) => { setPage(1); setFieldFilter(value); }}
+                  onNewProject={() => { setUploadTarget(null); setShowProjectForm(true); }}
                   onOpenProject={(project) => setDetailProjectId(project.id)}
                   socialActionKey={socialActionKey}
                   onLikeProject={toggleProjectLike}
@@ -504,8 +430,10 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
               {view === "members" && (
                 <MembersView
                   members={data.members}
-                  isAdmin={data.member.role === "admin"}
+                  currentMember={data.member}
                   onInvite={() => setShowInviteForm(true)}
+                  onEdit={setEditMember}
+                  onDelete={deleteMember}
                 />
               )}
               {view === "downloads" && data.member.role === "admin" && (
@@ -524,6 +452,7 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
 
       {showProjectForm && (
         <ProjectModal
+          targetProject={uploadTarget}
           onClose={() => setShowProjectForm(false)}
           onCreated={() => {
             setShowProjectForm(false);
@@ -533,6 +462,7 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
       )}
       {showInviteForm && (
         <InviteModal
+          allowAdminRole={Boolean(data && isSiteOwner(data.member.email))}
           onClose={() => setShowInviteForm(false)}
           onInvited={() => {
             setShowInviteForm(false);
@@ -549,6 +479,17 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
           }}
         />
       )}
+      {editMember && (
+        <EditMemberModal
+          member={editMember}
+          allowAdminRole={Boolean(data && isSiteOwner(data.member.email))}
+          onClose={() => setEditMember(null)}
+          onSaved={() => {
+            setEditMember(null);
+            void refreshWithNotice("成员权限已更新");
+          }}
+        />
+      )}
       {assignProject && data && (
         <AssignModal
           project={assignProject}
@@ -562,6 +503,9 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
       )}
       {detailProject && data && (
         <ProjectDetailModal
+          key={detailProject.id}
+          onOpenVersion={setDetailProjectId}
+          onUploadVersion={(project) => { setDetailProjectId(""); setUploadTarget(project); setShowProjectForm(true); }}
           project={detailProject}
           members={data.members}
           currentMember={data.member}
@@ -586,6 +530,7 @@ export function PaperBeeApp({ identity }: { identity: SiteIdentity }) {
           }}
           onClaim={claimProject}
           onAbandon={(project) => abandonProject(project.id, project.title)}
+          onVisibilityChanged={loadData}
           onFieldChange={updateProjectField}
           onDelete={deleteProject}
           onAddTag={addProjectTag}
@@ -640,8 +585,8 @@ function Overview({
   onNavigate: (view: View) => void;
   onDownload: (project: Project) => void;
 }) {
-  const underReview = data.projects.filter((project) => project.status === "审核中").length;
-  const passed = data.projects.filter((project) => project.status === "已通过").length;
+  const underReview = data.stats.underReview;
+  const passed = data.stats.passed;
   return (
     <>
       <section className="page-heading">
@@ -654,7 +599,7 @@ function Overview({
       </section>
 
       <section className="metric-grid">
-        <MetricCard label="全部项目" value={data.projects.length} note="内部可见" tone="ink" />
+        <MetricCard label="全部项目" value={data.stats.accessible} note="你可访问的项目" tone="ink" />
         <MetricCard label="审核中" value={underReview} note={underReview ? "等待审核报告" : "暂无进行中任务"} tone="blue" />
         <MetricCard label="待我审核" value={pendingReviews.length} note={pendingReviews.length ? "请关注截止日期" : "当前已清空"} tone="amber" />
         <MetricCard label="已通过" value={passed} note={`${activeMembers.length} 位活跃成员`} tone="green" />
@@ -699,7 +644,11 @@ function Overview({
   );
 }
 
-function ProjectsView({ projects, search, fieldFilter, onSearch, onFieldFilter, onNewProject, onOpenProject, socialActionKey, onLikeProject, onLikeTag }: {
+function ProjectsView({ pagination, onPage, loading, personal, projects, search, fieldFilter, onSearch, onFieldFilter, onNewProject, onOpenProject, socialActionKey, onLikeProject, onLikeTag }: {
+  pagination: BootstrapData["pagination"];
+  onPage: (page: number) => void;
+  loading: boolean;
+  personal: boolean;
   projects: Project[];
   search: string;
   fieldFilter: string;
@@ -712,9 +661,9 @@ function ProjectsView({ projects, search, fieldFilter, onSearch, onFieldFilter, 
   onLikeTag: (tag: ProjectTag) => Promise<boolean>;
 }) {
   return (
-    <>
+    <div aria-busy={loading}>
       <section className="page-heading compact">
-        <div><span className="eyebrow">项目资料库</span><h1>项目池</h1><p>所有材料均为内部版本，下载行为会被记录。</p></div>
+        <div><span className="eyebrow">项目资料库</span><h1>{personal ? "我的空间" : "项目池"}</h1><p>{personal ? "管理你上传的项目；私有项目仅自己可见，成员可见项目可由他人审稿。" : "浏览成员共享的科研项目，接取他人的项目参与审稿。"}</p></div>
         <button className="primary-button" onClick={onNewProject}><span>＋</span>上传新项目</button>
       </section>
       <div className="filter-bar">
@@ -734,8 +683,9 @@ function ProjectsView({ projects, search, fieldFilter, onSearch, onFieldFilter, 
                 aria-label={`查看项目详情：${project.title}`}
               >
                 <span className="field-pill">{project.field}</span>
-                <span className="project-code-inline">{project.publicCode}</span>
+                <span className="project-code-inline">{project.publicCode} · {project.visibility === "private" ? "仅自己可见" : "成员可见"}</span>
                 <h2>{project.title}</h2>
+                <span className="work-version-badge">{project.versionLabel || "未命名版本"} · {project.workVersionCount ?? 1} 个可见版本</span>
                 {(project.recommendedJournals || project.aiSubmissionAdvice) && (
                   <div className="compact-journal-advice">
                     <span>AI 投稿建议</span>
@@ -764,14 +714,22 @@ function ProjectsView({ projects, search, fieldFilter, onSearch, onFieldFilter, 
           ))}
         </div>
       )}
-    </>
+      <nav className="pagination-controls" aria-label="项目分页">
+        <button className="secondary-button" disabled={loading || pagination.page <= 1} onClick={() => onPage(pagination.page - 1)}>上一页</button>
+        <span role="status">{loading ? "正在加载…" : `第 ${pagination.page} / ${pagination.totalPages} 页 · 共 ${pagination.total} 项工作`}</span>
+        <button className="secondary-button" disabled={loading || pagination.page >= pagination.totalPages} onClick={() => onPage(pagination.page + 1)}>下一页</button>
+      </nav>
+    </div>
   );
 }
 
-function ProjectDetailModal({ project, members, currentMember, projectActionId, socialActionKey, onClose, onPreview, onEdit, onDownload, onAssign, onClaim, onAbandon, onFieldChange, onDelete, onAddTag, onLikeProject, onLikeTag }: {
+function ProjectDetailModal({ onOpenVersion, onUploadVersion, onVisibilityChanged, project, members, currentMember, projectActionId, socialActionKey, onClose, onPreview, onEdit, onDownload, onAssign, onClaim, onAbandon, onFieldChange, onDelete, onAddTag, onLikeProject, onLikeTag }: {
   project: Project;
   members: Member[];
   currentMember: Member;
+  onVisibilityChanged: () => Promise<void>;
+  onOpenVersion: (id: string) => void;
+  onUploadVersion: (project: Project) => void;
   projectActionId: string;
   socialActionKey: string;
   onClose: () => void;
@@ -801,7 +759,8 @@ function ProjectDetailModal({ project, members, currentMember, projectActionId, 
       <div className="project-detail">
         <div className="project-detail-top"><span className="field-pill">{project.field}</span><Status status={project.status} /></div>
         <p className="project-detail-summary">{project.summary || "未填写项目摘要，请下载中文说明查看项目内容。"}</p>
-        <dl className="project-detail-meta"><div><dt>作者</dt><dd>{project.ownerName}</dd></div><div><dt>当前版本</dt><dd>v{project.versionNumber ?? 1}</dd></div><div><dt>审核者</dt><dd>{project.activeReviewerName || "未分配"}</dd></div></dl>
+        <dl className="project-detail-meta"><div><dt>可见性</dt><dd>{project.visibility === "private" ? "仅自己可见" : "成员可见"}</dd></div><div><dt>作者</dt><dd>{project.ownerName}</dd></div><div><dt>稿件版本</dt><dd>{project.versionLabel || "未命名"} · 文件 v{project.versionNumber ?? 1}</dd></div><div><dt>审核者</dt><dd>{project.activeReviewerName || "未分配"}</dd></div></dl>
+        <WorkVersions project={project} isOwner={currentMember.id === project.ownerMemberId} onOpen={onOpenVersion} onUpload={onUploadVersion} onUpdated={onVisibilityChanged} />
         <div className="project-code-box"><div><span>项目编号</span><b>{project.publicCode}</b><small>项目编号只用于定位，访问仍需登录并通过权限检查。</small></div><button className="secondary-button" onClick={copyProjectCode}>{codeCopied ? "已复制" : "复制编号"}</button></div>
         {project.hasActiveAssignment && !project.canAccessReviewMaterials && (
           <div className="material-access-note">
@@ -840,7 +799,8 @@ function ProjectDetailModal({ project, members, currentMember, projectActionId, 
           <button className="secondary-button" onClick={() => onPreview(project)}>预览材料</button>
           <button className="secondary-button" onClick={() => onDownload(project)}>下载材料</button>
           {canManage && <button className="secondary-button" onClick={() => onEdit(project)}>编辑项目</button>}
-          {canClaimProject({ hasActiveAssignment: project.hasActiveAssignment }) && (
+          {project.ownerMemberId === currentMember.id && <ProjectVisibility project={project} onUpdated={onVisibilityChanged} />}
+          {canClaimProject({ hasActiveAssignment: project.hasActiveAssignment, memberId: currentMember.id, ownerMemberId: project.ownerMemberId, visibility: project.visibility }) && (
             <button className="primary-button" disabled={actionPending} onClick={() => onClaim(project)}>
               {actionPending ? "正在接取…" : "接取项目"}
             </button>
@@ -850,7 +810,7 @@ function ProjectDetailModal({ project, members, currentMember, projectActionId, 
               {actionPending ? "处理中…" : "放弃审核"}
             </button>
           )}
-          {canManage && !project.hasActiveAssignment && members.length > 0 && <button className="text-button" onClick={() => onAssign(project)}>指定审稿人 →</button>}
+          {canManage && project.visibility === "internal" && !project.hasActiveAssignment && members.length > 0 && <button className="text-button" onClick={() => onAssign(project)}>指定审稿人 →</button>}
           <button
             className={`like-button ${project.likedByMe ? "liked" : ""}`}
             disabled={socialActionKey === `project-like:${project.id}`}
@@ -947,15 +907,38 @@ function ReviewsView({ assignments, projectActionId, onReview, onAbandon }: {
   );
 }
 
-function MembersView({ members, isAdmin, onInvite }: { members: Member[]; isAdmin: boolean; onInvite: () => void }) {
+function MembersView({ members, currentMember, onInvite, onEdit, onDelete }: {
+  members: Member[];
+  currentMember: Member;
+  onInvite: () => void;
+  onEdit: (member: Member) => void;
+  onDelete: (member: Member) => void;
+}) {
+  const isAdmin = currentMember.role === "admin";
+  const currentIsSiteOwner = isSiteOwner(currentMember.email);
   return (
     <>
       <section className="page-heading compact"><div><span className="eyebrow">访问控制</span><h1>成员</h1><p>只有管理员创建的账号才能进入工作区。</p></div>{isAdmin && <button className="primary-button" onClick={onInvite}><span>＋</span>创建成员</button>}</section>
       <div className="panel member-panel">
-        <div className="member-table-head"><span>成员</span><span>研究方向</span><span>角色</span><span>状态</span></div>
-        {members.map((member) => (
-          <div className="member-row" key={member.id}><div className="member-person"><span>{initials(member.name)}</span><div><b>{member.name}</b><small>{member.email}</small></div></div><span>{member.researchField}</span><span>{roleLabel(member.role)}</span><span className={`member-status ${member.status}`}>{member.status === "active" ? "已加入" : member.status === "invited" ? "待登录" : "已停用"}</span></div>
-        ))}
+        <div className="member-table-head"><span>成员</span><span>研究方向</span><span>角色</span><span>状态</span>{isAdmin && <span>操作</span>}</div>
+        {members.map((member) => {
+          const protectedOwner = isSiteOwner(member.email);
+          const protectedAdmin = member.role === "admin" && !currentIsSiteOwner;
+          return <div className="member-row" key={member.id}>
+            <div className="member-person"><span>{initials(member.name)}</span><div><b>{member.name}</b><small>{member.email}</small></div></div>
+            <span>{member.researchField}</span>
+            <span>{roleLabel(member.role, member.email)}</span>
+            <span className={`member-status ${member.status}`}>{member.status === "active" ? "已加入" : member.status === "invited" ? "待登录" : "已停用"}</span>
+            {isAdmin && (protectedOwner || protectedAdmin ? (
+              <span className="member-owner-lock">{protectedOwner ? "最高权限 · 受保护" : "仅站点管理员可管理"}</span>
+            ) : (
+              <div className="member-actions">
+                <button className="text-button" onClick={() => onEdit(member)}>编辑权限</button>
+                <button className="text-button danger-text" onClick={() => onDelete(member)}>删除成员</button>
+              </div>
+            ))}
+          </div>
+        })}
       </div>
     </>
   );
@@ -995,178 +978,8 @@ function DownloadLogsView({ logs, limit, loading, error, onRetry }: {
   );
 }
 
-function EditProjectModal({ project, deleting, onClose, onDelete, onUpdated }: {
-  project: Project;
-  deleting: boolean;
-  onClose: () => void;
-  onDelete: (project: Project) => void;
-  onUpdated: () => void;
-}) {
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState("");
-  const selectedJournals = new Set(project.recommendedJournals.split(",").filter(Boolean));
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setSubmitting(true);
-    setFormError("");
-    try {
-      const response = await fetch(`/api/projects/${project.id}`, {
-        method: "PATCH",
-        body: new FormData(event.currentTarget),
-      });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "无法更新项目");
-      onUpdated();
-    } catch (caught) {
-      setFormError(caught instanceof Error ? caught.message : "无法更新项目");
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
-  return (
-    <Modal title="编辑项目" subtitle={`${project.title} · 当前 v${project.versionNumber ?? 1}`} onClose={onClose} wide>
-      <form className="modal-form" onSubmit={submit}>
-        <div className="version-safety-note">
-          <b>项目资料按版本保存</b>
-          <p>标题、摘要和投稿建议会直接更新；只要选择了新文件，所选材料就会组成下一个版本，旧文件及其下载记录不会被覆盖，项目状态会转为“待修改”。</p>
-        </div>
-        <label><span>项目标题 *</span><input name="title" required maxLength={140} defaultValue={project.title} /></label>
-        <div className="form-row">
-          <label><span>研究领域 *</span><select name="field" required defaultValue={project.field}>{FIELD_OPTIONS.map((field) => <option key={field}>{field}</option>)}</select></label>
-          <label><span>AI 使用情况</span><select name="aiDisclosure" defaultValue={project.aiDisclosure}><option>未使用生成式 AI</option><option>AI 辅助写作与代码</option><option>AI 主导生成，人工全面核验</option></select></label>
-        </div>
-        <label><span>项目摘要（可选）</span><textarea name="summary" rows={3} maxLength={900} defaultValue={project.summary} /></label>
-        <section className="journal-advice-form" aria-labelledby="edit-journal-advice-title">
-          <div><b id="edit-journal-advice-title">AI 投稿建议（可选）</b><small>可以更新候选期刊和建议理由。</small></div>
-          <div className="journal-options" role="group" aria-label="AI 建议的候选期刊">
-            {JOURNAL_OPTIONS.map((journal) => (
-              <label className="journal-choice" key={journal}>
-                <input type="checkbox" name="recommendedJournals" value={journal} defaultChecked={selectedJournals.has(journal)} />
-                <span>{journal}</span>
-              </label>
-            ))}
-          </div>
-          <label className="journal-advice-text"><span>建议理由或其他期刊</span><textarea name="aiSubmissionAdvice" rows={3} maxLength={1800} defaultValue={project.aiSubmissionAdvice} /></label>
-        </section>
-        <div className="artifact-upload-grid">
-          <label className="file-drop"><span className="upload-mark">1</span><b>更新中文说明</b><small>MD、TXT、PDF 或 DOCX · 不更新可留空</small><input name="descriptionFile" type="file" accept=".md,.txt,.pdf,.docx" /></label>
-          <label className="file-drop"><span className="upload-mark">2</span><b>更新 AI 预审</b><small>MD、TXT、PDF 或 DOCX · 不更新可留空</small><input name="aiReviewFile" type="file" accept=".md,.txt,.pdf,.docx" /></label>
-          <label className="file-drop"><span className="upload-mark">3</span><b>更新论文</b><small>PDF · 不更新可留空</small><input name="paperFile" type="file" accept=".pdf" /></label>
-          <label className="file-drop"><span className="upload-mark">4</span><b>更新复现包</b><small>ZIP、TAR.GZ 或 TGZ · 不更新可留空</small><input name="reproductionFile" type="file" accept=".zip,.tar.gz,.tgz" /></label>
-        </div>
-        {formError && <p className="form-error">{formError}</p>}
-        <div className="modal-actions">
-          <button type="button" className="danger-button edit-delete-button" disabled={submitting || deleting} onClick={() => onDelete(project)}>{deleting ? "正在删除…" : "删除项目"}</button>
-          <button type="button" className="secondary-button" disabled={deleting} onClick={onClose}>取消</button>
-          <button className="primary-button" disabled={submitting || deleting}>{submitting ? "正在保存…" : "保存修改"}</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
 
-function ProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [uploadMode, setUploadMode] = useState<"manual" | "ai">("manual");
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState("");
-  const [promptCopied, setPromptCopied] = useState(false);
-  const copyPrompt = async () => {
-    setSubmitting(true);
-    setFormError("");
-    try {
-      let prompt = UPLOAD_AI_PROMPT;
-      if (uploadMode === "ai") {
-        const response = await fetch("/api/upload-tokens", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: "六十分钟 AI 上传" }),
-        });
-        const payload = (await response.json()) as { token?: string; error?: string };
-        if (!response.ok || !payload.token) throw new Error(payload.error ?? "无法生成临时上传授权");
-        prompt = buildAiGenerateAndUploadPrompt(payload.token);
-      }
-      await navigator.clipboard.writeText(prompt);
-      setPromptCopied(true);
-      window.setTimeout(() => setPromptCopied(false), 2200);
-    } catch (caught) {
-      setFormError(caught instanceof Error ? caught.message : "自动复制失败，请重新点击复制");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setSubmitting(true); setFormError("");
-    try {
-      const response = await fetch("/api/projects", { method: "POST", body: new FormData(event.currentTarget) });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "上传失败");
-      onCreated();
-    } catch (caught) { setFormError(caught instanceof Error ? caught.message : "上传失败"); }
-    finally { setSubmitting(false); }
-  };
-  return (
-    <Modal title="上传新项目" subtitle="选择自己上传，或让能读取项目文件的 AI 整理并直接提交" onClose={onClose} wide>
-      <form className="modal-form" onSubmit={submit}>
-        <div className="upload-mode-switch" role="tablist" aria-label="上传方式">
-          <button type="button" role="tab" aria-selected={uploadMode === "manual"} className={uploadMode === "manual" ? "active" : ""} onClick={() => { setUploadMode("manual"); setFormError(""); }}>手动上传</button>
-          <button type="button" role="tab" aria-selected={uploadMode === "ai"} className={uploadMode === "ai" ? "active" : ""} onClick={() => { setUploadMode("ai"); setFormError(""); }}>AI 生成并上传</button>
-        </div>
-        <section className="upload-spec" aria-labelledby="upload-spec-title">
-          <div className="upload-spec-heading"><div><span className="eyebrow">上传规范</span><h3 id="upload-spec-title">准备四类项目材料</h3></div><span>单文件 ≤ 25 MB</span></div>
-          <ol>
-            <li><b>科研项目中文说明</b><em>必须</em><small>按项目自己的科学逻辑，写成面向同行的研讨会式研究导读，并单独说明创新性。</small></li>
-            <li><b>AI 预审摘要</b><em className="optional">可选</em><small>比中文说明更短，包含各维度评分、贡献、风险与审核重点；仅供参考。</small></li>
-            <li><b>论文</b><em className="optional">可选</em><small>PDF；没有成稿时可以不上传，禁止为了凑齐材料而编造内容。</small></li>
-            <li><b>完整复现包</b><em className="optional">可选</em><small>ZIP、TAR.GZ 或 TGZ；应含 README、代码、环境、数据说明、运行命令和预期输出。</small></li>
-          </ol>
-          <div className="ai-prompt-box">
-            <div>
-              <b>{uploadMode === "manual" ? "让 AI 只整理材料" : "让 AI 整理并自动上传"}</b>
-              <small>{uploadMode === "manual" ? "提示词只要求生成规范的 output，完成后由你选择文件上传。" : "复制时自动加入六十分钟临时授权；成功上传一次后立即失效。"}</small>
-            </div>
-            <button type="button" className="secondary-button" disabled={submitting} onClick={copyPrompt}>{submitting ? "正在准备…" : promptCopied ? "已复制" : uploadMode === "manual" ? "复制材料整理提示词" : "复制 AI 上传提示词"}</button>
-          </div>
-        </section>
-        {uploadMode === "manual" ? <>
-        <label><span>项目标题 *</span><input name="title" required maxLength={140} placeholder="例如：量子纠缠见证的数值验证" /></label>
-        <div className="form-row"><label><span>研究领域 *</span><select name="field" required defaultValue=""><option value="" disabled>选择领域</option>{FIELD_OPTIONS.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>AI 使用情况</span><select name="aiDisclosure" defaultValue="AI 辅助写作与代码"><option>未使用生成式 AI</option><option>AI 辅助写作与代码</option><option>AI 主导生成，人工全面核验</option></select></label></div>
-        <label><span>项目摘要（可选）</span><textarea name="summary" rows={3} maxLength={900} placeholder="可简要说明研究问题和目前完成度，也可以留空" /></label>
-        <section className="journal-advice-form" aria-labelledby="journal-advice-title">
-          <div><b id="journal-advice-title">AI 投稿建议（可选）</b><small>记录 AI 建议的候选期刊和理由，仅供真人判断，不影响上传。</small></div>
-          <div className="journal-options" role="group" aria-label="AI 建议的候选期刊">
-            {JOURNAL_OPTIONS.map((journal) => (
-              <label className="journal-choice" key={journal}>
-                <input type="checkbox" name="recommendedJournals" value={journal} />
-                <span>{journal}</span>
-              </label>
-            ))}
-          </div>
-          <label className="journal-advice-text">
-            <span>建议理由或其他期刊</span>
-            <textarea name="aiSubmissionAdvice" rows={3} maxLength={1800} placeholder="例如：AI 建议优先考虑 PRD；工作属于专业方向内的方法贡献，PRL 风格突破性不足。可留空。" />
-          </label>
-        </section>
-        <div className="artifact-upload-grid">
-          <label className="file-drop required-file"><span className="upload-mark">1</span><b>科研项目中文说明 *</b><small>让审核者快速读懂项目 · 必须上传</small><input name="descriptionFile" type="file" required accept=".md,.txt,.pdf,.docx" /></label>
-          <label className="file-drop"><span className="upload-mark">2</span><b>AI 预审摘要</b><small>MD、TXT、PDF 或 DOCX · 可选</small><input name="aiReviewFile" type="file" accept=".md,.txt,.pdf,.docx" /></label>
-          <label className="file-drop"><span className="upload-mark">3</span><b>论文</b><small>PDF · 可选</small><input name="paperFile" type="file" accept=".pdf" /></label>
-          <label className="file-drop"><span className="upload-mark">4</span><b>完整复现包</b><small>ZIP、TAR.GZ 或 TGZ · 可选</small><input name="reproductionFile" type="file" accept=".zip,.tar.gz,.tgz" /></label>
-        </div>
-        </> : (
-          <section className="ai-upload-note">
-            <b>复制后直接交给 AI</b>
-            <p>提示词不会在网页上展示，其中已经合并了材料生成规范、项目字段、PaperBee 工具和临时授权。首次使用前，在 ChatGPT 的插件或连接器设置中添加 https://paperbee.asia/mcp；之后 AI 可以把当前对话生成的文件直接交给网站。</p>
-            <p>授权从复制时开始计时，有效六十分钟，只能成功上传一个项目，也不能读取或下载站内内容。</p>
-          </section>
-        )}
-        {formError && <p className="form-error">{formError}</p>}
-        <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>{uploadMode === "manual" ? "取消" : "关闭"}</button>{uploadMode === "manual" && <button className="primary-button" disabled={submitting}>{submitting ? "正在安全上传…" : "提交项目"}</button>}</div>
-      </form>
-    </Modal>
-  );
-}
 
 function MaterialsModal({ project, onClose }: { project: Project; onClose: () => void }) {
   const available = new Set(project.artifactKinds.split(",").filter(Boolean));
@@ -1311,42 +1124,54 @@ function PreviewModal({ project, onClose }: { project: Project; onClose: () => v
   );
 }
 
-function InviteModal({ onClose, onInvited }: { onClose: () => void; onInvited: () => void }) {
+function InviteModal({ allowAdminRole, onClose, onInvited }: { allowAdminRole: boolean; onClose: () => void; onInvited: () => void }) {
   const [submitting, setSubmitting] = useState(false); const [formError, setFormError] = useState("");
   const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setSubmitting(true); setFormError(""); const values = Object.fromEntries(new FormData(event.currentTarget)); try { const response = await fetch("/api/members", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) }); const payload = (await response.json()) as { error?: string }; if (!response.ok) throw new Error(payload.error ?? "邀请失败"); onInvited(); } catch (caught) { setFormError(caught instanceof Error ? caught.message : "邀请失败"); } finally { setSubmitting(false); } };
-  return <Modal title="创建成员账号" subtitle="请通过安全渠道把初始密码告知对方" onClose={onClose}><form className="modal-form" onSubmit={submit}><div className="form-row"><label><span>姓名 *</span><input name="name" required /></label><label><span>邮箱 *</span><input name="email" type="email" required /></label></div><label><span>初始密码 *</span><input name="password" type="password" required minLength={12} autoComplete="new-password" placeholder="至少 12 个字符" /></label><div className="form-row"><label><span>角色</span><select name="role" defaultValue="reviewer"><option value="member">成员</option><option value="reviewer">审核者</option><option value="admin">管理员</option></select></label><label><span>研究方向</span><input name="researchField" placeholder="例如：量子信息" /></label></div>{formError && <p className="form-error">{formError}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={submitting}>{submitting ? "正在创建…" : "创建账号"}</button></div></form></Modal>;
+  return <Modal title="创建成员账号" subtitle="请通过安全渠道把初始密码告知对方" onClose={onClose}><form className="modal-form" onSubmit={submit}><div className="form-row"><label><span>姓名 *</span><input name="name" required /></label><label><span>邮箱 *</span><input name="email" type="email" required /></label></div><label><span>初始密码 *</span><input name="password" type="password" required minLength={12} autoComplete="new-password" placeholder="至少 12 个字符" /></label><div className="form-row"><label><span>角色</span><select name="role" defaultValue="reviewer"><option value="member">成员</option><option value="reviewer">审核者</option>{allowAdminRole && <option value="admin">管理员</option>}</select></label><label><span>研究方向</span><input name="researchField" placeholder="例如：量子信息" /></label></div>{formError && <p className="form-error">{formError}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={submitting}>{submitting ? "正在创建…" : "创建账号"}</button></div></form></Modal>;
 }
 
-function buildAiGenerateAndUploadPrompt(token: string) {
-  return `${UPLOAD_AI_PROMPT}
-
-生成上述材料后，请继续上传到我的内部科研审核网站。不要只告诉我如何操作，也不要使用 curl。先调用已经连接的 PaperBee 工具 check_paperbee_connection；连接正常后，把当前对话中真实存在的项目文件作为 materials 文件数组，直接调用 upload_research_project。不要调用 prepare_research_upload，不要等待或尝试打开文件选择面板，也不要把 File Library 文件 ID、文件名字符串或 sandbox 路径冒充文件对象。PaperBee MCP 地址是 https://paperbee.asia/mcp 。临时授权从现在起六十分钟内有效，并会在首次成功上传后立即失效。
-
-调用工具时，把下面的临时授权作为 uploadToken 提交：
-${token}
-
-必填文字字段：
-- title：项目标题
-- field：研究领域，必须从以下选一项：${FIELD_OPTIONS.join("、")}
-
-可选文字字段：
-- summary：项目摘要，最多 900 字
-- aiDisclosure：未使用生成式 AI / AI 辅助写作与代码 / AI 主导生成，人工全面核验
-- recommendedJournals：可重复提交，候选值包括 PRL、PRD、PRC、PRA、PRX、EPJC、CPC、JHEP
-- aiSubmissionAdvice：AI 投稿建议，最多 1800 字
-
-PaperBee 会按文件名自动识别各文件用途：
-- 项目中文说明.md、项目中文说明(4).md、中文物理导读.md 等 → 科研项目中文说明（必需；接受 MD、TXT、PDF、DOCX）
-- AI预审摘要.md → AI 预审摘要（可选）
-- 论文.pdf、paper.pdf 或 manuscript.pdf → 论文（可选）
-- 完整复现包.zip、reproduction.zip 等 → 完整复现包（可选；ZIP、TAR.GZ 或 TGZ）
-
-每个文件不超过 25 MB，最多四个。只上传真实存在的文件，不要为了补齐可选材料而生成空文件。如果当前只有包含上述材料的 output.zip，可以原样解压，确认其中真实文件后再把解压出的文件对象传给 upload_research_project；不要把整个 output.zip 冒充完整复现包。不要自行读取文件并转成 Base64，也不要把 sandbox 路径当成公网网址。
-
-如果当前会话找不到 check_paperbee_connection 或 upload_research_project 工具，或者连接检查无法返回服务版本，不要退回 curl、浏览器表单、文件选择面板或直接传 File Library ID，也不要声称上传成功；请明确告诉我需要刷新 https://paperbee.asia/mcp 插件并新开对话，然后重新复制一次提示词以取得新授权。如果直接上传被 OpenAI 文件安全检查拦截，或者当前文件无法解析成受控文件对象，只重试一次；仍失败就停止并请我把四个文件或 output.zip 附加到当前对话，不要重新生成科研内容。工具返回失败时，读取 structuredContent 中的 errorCode 和 error：TOKEN_EXPIRED 表示需要重新复制提示词，TOKEN_REVOKED 表示授权已使用或撤销，TOKEN_INVALID 表示授权无效；不要猜测或伪造新授权。不要在输出、日志或聊天总结中打印上传密钥，也不要把它写入项目文件。
-
-上传成功后告诉我项目标题、已上传的文件、跳过的可选文件和 projectId。`;
+function EditMemberModal({ member, allowAdminRole, onClose, onSaved }: { member: Member; allowAdminRole: boolean; onClose: () => void; onSaved: () => void }) {
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState("");
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setFormError("");
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      const response = await fetch(`/api/members/${member.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "无法更新成员");
+      onSaved();
+    } catch (caught) {
+      setFormError(caught instanceof Error ? caught.message : "无法更新成员");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <Modal title="编辑成员权限" subtitle={member.email} onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <div className="form-row">
+          <label><span>姓名 *</span><input name="name" required maxLength={120} defaultValue={member.name} /></label>
+          <label><span>研究方向</span><input name="researchField" maxLength={120} defaultValue={member.researchField} /></label>
+        </div>
+        <div className="form-row">
+          <label><span>角色</span><select name="role" defaultValue={member.role}><option value="member">研究成员</option><option value="reviewer">审核成员</option>{allowAdminRole && <option value="admin">空间管理员</option>}</select></label>
+          <label><span>状态</span><select name="status" defaultValue={member.status}>{member.status === "invited" && <option value="invited">待登录</option>}<option value="active">启用</option><option value="disabled">停用</option></select></label>
+        </div>
+        <p className="member-security-note">停用后，该成员的网页登录会话、AI 上传授权和 ChatGPT OAuth 连接会立即失效。</p>
+        {formError && <p className="form-error">{formError}</p>}
+        <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={submitting}>{submitting ? "正在保存…" : "保存成员设置"}</button></div>
+      </form>
+    </Modal>
+  );
 }
+
 
 function PasswordModal({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
   const [submitting, setSubmitting] = useState(false);
@@ -1391,19 +1216,15 @@ function ReviewModal({ assignment, onClose, onSubmitted }: { assignment: Assignm
   return <Modal title="提交审核报告" subtitle={assignment.projectTitle} onClose={onClose} wide><form className="modal-form" onSubmit={submit}><div className="scope-box"><span>本次审核范围</span><p>{assignment.scope}</p></div><div className="form-row"><label><span>审核结论 *</span><select name="verdict" required defaultValue=""><option value="" disabled>选择结论</option><option>建议通过</option><option>小修后通过</option><option>需要重大修改</option><option>暂不建议继续</option></select></label><label><span>正确性检查 *</span><select name="correctness" required defaultValue=""><option value="" disabled>选择结果</option><option>范围内未发现实质问题</option><option>存在可修正问题</option><option>存在重大问题</option><option>未能完成检查</option></select></label></div><div className="form-row"><label><span>复现性 *</span><select name="reproducibility" required defaultValue=""><option value="" disabled>选择结果</option><option>完整复现</option><option>部分复现</option><option>无法复现</option><option>不在审核范围</option></select></label><label><span>数据与伦理 *</span><select name="dataAndEthics" required defaultValue=""><option value="" disabled>选择结果</option><option>范围内未发现风险</option><option>需要补充来源说明</option><option>存在敏感或合规风险</option><option>不在审核范围</option></select></label></div><label><span>审核摘要 *</span><textarea name="summary" required rows={3} placeholder="概括采用的方法、完成的检查和总体判断" /></label><label><span>主要问题</span><textarea name="majorIssues" rows={3} placeholder="逐条说明会影响结论的问题；没有可填写“无”" /></label><label><span>次要问题</span><textarea name="minorIssues" rows={2} placeholder="格式、表述、补充检查等建议" /></label>{formError && <p className="form-error">{formError}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>保存后再说</button><button className="primary-button" disabled={submitting}>{submitting ? "正在归档…" : "提交并归档"}</button></div></form></Modal>;
 }
 
-function Modal({ title, subtitle, onClose, children, wide = false, reader = false }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode; wide?: boolean; reader?: boolean }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className={`modal ${wide ? "modal-wide" : ""} ${reader ? "modal-reader" : ""}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div><button onClick={onClose} aria-label="关闭">×</button></div>{children}</section></div>;
-}
 
-function MetricCard({ label, value, note, tone }: { label: string; value: number; note: string; tone: string }) { return <article className={`metric-card metric-${tone}`}><div><span>{label}</span><b>{value}</b></div><p><i />{note}</p><span className="metric-shape" /></article>; }
-function Status({ status }: { status: string }) { return <span className={`status ${STATUS_CLASS[status] ?? (status === "已完成" ? "status-green" : "status-neutral")}`}><i />{status}</span>; }
-function EmptyProjects({ onNewProject }: { onNewProject: () => void }) { return <div className="empty-state embedded"><span className="empty-document">＋</span><h2>还没有内部项目</h2><p>上传第一个固定版本，然后为它分配清晰的审核范围。</p><button className="secondary-button" onClick={onNewProject}>上传第一个项目</button></div>; }
-function LoadingState() { return <div className="loading-grid"><span /><span /><span /><span /><div /></div>; }
-function ErrorState({ message, retry }: { message: string; retry: () => void }) { return <div className="panel empty-state"><span className="error-mark">!</span><h2>工作台暂时无法载入</h2><p>{message}</p><button className="secondary-button" onClick={retry}>重试</button></div>; }
-async function logout() { await fetch("/api/auth/logout", { method: "POST" }); window.location.reload(); }
+
+
+
+
+
 function initials(name: string) { const clean = name.trim(); if (!clean) return "PB"; const parts = clean.split(/\s+/); return parts.length > 1 ? `${parts[0][0]}${parts[1][0]}`.toUpperCase() : clean.slice(0, 2).toUpperCase(); }
 function shortName(name: string) { return name.length > 6 ? name.slice(0, 4) : name; }
-function roleLabel(role: string) { return role === "admin" ? "空间管理员" : role === "reviewer" ? "审核成员" : "研究成员"; }
+function roleLabel(role: string, email?: string) { return email && isSiteOwner(email) ? "站点管理员" : role === "admin" ? "空间管理员" : role === "reviewer" ? "审核成员" : "研究成员"; }
 function artifactKindLabel(kind: string) { return kind === "description" ? "中文说明" : kind === "ai-review" ? "AI 预审" : kind === "paper" ? "论文" : kind === "reproduction" ? "复现包" : kind; }
 function auditActionLabel(action: string, kind: string | null, fileName: string | null) {
   const material = kind ? artifactKindLabel(kind) : "";
@@ -1418,3 +1239,5 @@ function beijingGreeting(value = new Date()) { const hourPart = new Intl.DateTim
 function normalizeDatabaseDate(value: string) { return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(" ", "T")}Z` : value; }
 function formatDate(value: string, full = false) { const date = new Date(normalizeDatabaseDate(value)); if (Number.isNaN(date.valueOf())) return value; return new Intl.DateTimeFormat("zh-CN", full ? { month: "long", day: "numeric", weekday: "short", timeZone: "Asia/Shanghai" } : { month: "numeric", day: "numeric", timeZone: "Asia/Shanghai" }).format(date); }
 function formatDateTime(value: string) { const date = new Date(normalizeDatabaseDate(value)); if (Number.isNaN(date.valueOf())) return value; return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Asia/Shanghai" }).format(date); }
+
+async function logout() { await fetch("/api/auth/logout", { method: "POST" }); window.location.reload(); }

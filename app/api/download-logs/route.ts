@@ -1,7 +1,9 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, isNotNull, isNull, or, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiAccessLogs, downloadLogs, members, projects, projectVersions } from "@/db/schema";
 import { AccessError, errorResponse, requireActiveMember } from "@/lib/auth";
+
+import { visibleProjects } from "@/lib/project-access";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +35,7 @@ export async function GET() {
       .innerJoin(projects, eq(downloadLogs.projectId, projects.id))
       .innerJoin(projectVersions, eq(downloadLogs.versionId, projectVersions.id))
       .innerJoin(members, eq(downloadLogs.memberId, members.id))
+      .where(visibleProjects(member))
       .orderBy(desc(downloadLogs.downloadedAt))
       .limit(MAX_LOGS),
     db.select({
@@ -54,6 +57,7 @@ export async function GET() {
       .innerJoin(members, eq(aiAccessLogs.memberId, members.id))
       .leftJoin(projects, eq(aiAccessLogs.projectId, projects.id))
       .leftJoin(projectVersions, eq(aiAccessLogs.versionId, projectVersions.id))
+      .where(or(and(isNotNull(projects.id), visibleProjects(member)), isNull(aiAccessLogs.projectId)))
       .orderBy(desc(aiAccessLogs.createdAt))
       .limit(MAX_LOGS)]);
 

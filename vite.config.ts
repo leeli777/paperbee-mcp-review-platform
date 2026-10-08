@@ -37,6 +37,7 @@ const localBindingConfig = {
     },
   ],
   observability: { enabled: true },
+  ...(process.env.PAPERBEE_TEST_SETUP_TOKEN ? { vars: { SETUP_TOKEN: process.env.PAPERBEE_TEST_SETUP_TOKEN } } : {}),
 };
 
 export default defineConfig(async () => {

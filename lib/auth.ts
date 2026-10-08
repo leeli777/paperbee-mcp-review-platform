@@ -1,8 +1,9 @@
-import { and, count, eq, gt } from "drizzle-orm";
+import { and, count, eq, gt, sql } from "drizzle-orm";
 import { cookies } from "next/headers";
 import { getDb } from "@/db";
 import { members, sessions } from "@/db/schema";
 import { createSessionToken, hashSessionToken } from "@/lib/credentials";
+import { SITE_OWNER_EMAIL } from "@/lib/site-owner";
 
 const SESSION_COOKIE = "paperbee_session";
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -111,7 +112,10 @@ export async function requireActiveMember() {
 
 export async function isSetupRequired() {
   const db = await getDb();
-  const [{ value }] = await db.select({ value: count() }).from(members);
+  const [{ value }] = await db
+    .select({ value: count() })
+    .from(members)
+    .where(sql`lower(${members.email}) = ${SITE_OWNER_EMAIL}`);
   return value === 0;
 }
 

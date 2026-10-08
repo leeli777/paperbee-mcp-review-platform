@@ -2,6 +2,7 @@ import { getDb } from "@/db";
 import { members } from "@/db/schema";
 import { AccessError, errorResponse, requireActiveMember } from "@/lib/auth";
 import { hashPassword } from "@/lib/credentials";
+import { isSiteOwner } from "@/lib/site-owner";
 
 export async function POST(request: Request) {
   try {
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
     const email = payload.email?.trim().toLowerCase() ?? "";
     const name = payload.name?.trim() ?? "";
     const password = payload.password ?? "";
-    const role = ["member", "reviewer", "admin"].includes(payload.role ?? "")
+    const requestedRole = ["member", "reviewer", "admin"].includes(payload.role ?? "")
       ? payload.role!
       : "member";
     if (!email || !name || !email.includes("@")) {
@@ -26,6 +27,12 @@ export async function POST(request: Request) {
     }
     if (password.length < 12) {
       return Response.json({ error: "初始密码至少需要 12 个字符" }, { status: 400 });
+    }
+    if (isSiteOwner(email)) {
+      throw new AccessError("站点管理员账号只能在站点初始化时创建", 409);
+    }
+    if (requestedRole === "admin" && !isSiteOwner(member.email)) {
+      throw new AccessError("只有站点管理员可以创建管理员账号", 403);
     }
 
     const db = await getDb();
@@ -35,7 +42,7 @@ export async function POST(request: Request) {
       passwordHash: await hashPassword(password),
       email,
       name,
-      role,
+      role: requestedRole,
       researchField: payload.researchField?.trim() || "待补充",
       status: "active",
     });

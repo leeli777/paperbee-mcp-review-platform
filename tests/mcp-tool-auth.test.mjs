@@ -53,3 +53,20 @@ test("declares upload-token tools as anonymous and project reads as OAuth", asyn
     assert.deepEqual(tools[name]._meta.securitySchemes, oauth);
   }
 });
+
+test("revision discovery requires OAuth and upload accepts an explicit existing project", async () => {
+  const response = await post(new Request("https://paperbee.asia/mcp", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+  }));
+  const payload = await response.json();
+  const tools = Object.fromEntries(payload.result.tools.map(tool => [tool.name, tool]));
+  assert.deepEqual(tools.find_my_research_works?.securitySchemes, [{ type: "oauth2", scopes: ["paperbee:read"] }]);
+  assert.equal(tools.upload_research_project.inputSchema.properties.targetProjectId.type, "string");
+  assert.equal(tools.upload_research_project.inputSchema.properties.versionLabel.maxLength, 60);
+  const denied = await post(new Request("https://paperbee.asia/mcp", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "find_my_research_works", arguments: {} } }),
+  }));
+  assert.equal((await denied.json()).result.isError, true);
+});
